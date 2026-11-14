@@ -1,0 +1,135 @@
+# reify CLI
+
+Build/install the developer binary:
+
+```sh
+cargo build --release -p reify-cli
+cargo install --path crates/reify-cli
+reify --help
+```
+
+## Compile and mount
+
+```sh
+reify https://example.com 'search flights'
+reify --chromium /path/to/chromium --timeout 30 https://example.com search flights
+```
+
+The default mode reserves `127.0.0.1:8080`, resolves the canonical BLAKE3 domain/goal
+key through the server's shared `ServerStore`, and captures/synthesizes only on a
+cache miss. It stays in the foreground serving `/mcp` until Ctrl+C or SIGTERM.
+It does not fork an unmanaged server process or silently edit client config files.
+Chromium is discovered through `REIFY_CHROMIUM_PATH`, Playwright's cache, or PATH.
+Put global options before the URL; all following words are the goal, including
+words such as `serve` that also name subcommands.
+
+The summary displays measured capture/synthesis times, retained API-frame counts,
+tool names/descriptions and input types, the endpoint, cache key, and mount token.
+No static-noise counts or sub-two-second guarantees are fabricated. Cold capture
+latency depends on Chromium startup and the target page. The server's 45-second
+whole-mount deadline also bounds the configurable probe budget in mount/call modes.
+
+The printed Claude Code `.mcp.json`, Cursor `.cursor/mcp.json`, and OpenCode v2
+`opencode.json` configurations carry `Reify-Mount` in request headers so clients
+immediately discover the warmed tools. Every HTTP request remains independently
+scoped; no connection session is created. OpenCode's snippet explicitly selects
+protocol `2026-07-28`. `reify` remains listed alongside the compiled tools.
+
+Configuration shapes follow the primary [Claude Code](https://code.claude.com/docs/en/mcp),
+[Cursor](https://cursor.com/docs/mcp), and [OpenCode](https://opencode.ai/docs/mcp-servers/)
+documentation. Clients must support the current stateless MCP revision. Mount
+headers are private routing capabilities for one server instance, not a replacement
+for host authentication or a persistent credential store.
+
+## Gateway, probe, and call
+
+```sh
+reify serve
+reify serve --host 127.0.0.1 --port 8081
+reify --color never probe https://example.com > capture.json
+reify call https://example.com search_flights '{"q":"KTM"}'
+reify call https://example.com search_flights '{"q":"KTM"}' --goal 'search flights' \
+  --gateway http://127.0.0.1:8080/mcp
+```
+
+`serve` binds the requested hostname/IP and port, prints the actual endpoint
+(including ephemeral port 0), and exposes the root meta-tool. `probe` runs the
+real headless capture and writes one pretty JSON document containing frames,
+final URL, title, and duration. The standalone `AuthContext` is omitted; raw frame
+headers and bodies remain visible for diagnostics and may contain credentials.
+No server starts for `probe`.
+
+`call` validates a JSON **object** at the command boundary, resolves the target's
+compiled tools, invokes the exact named plan, and prints its result as JSON. Tool
+errors are still printed as structured JSON and return exit code 1. HTTP mutation
+calls are never retried automatically. Missing tool names report the available
+names instead of guessing an endpoint.
+
+Caches live in a running process and are not serialized to disk with credentials.
+An independent `call` without `--gateway` has a fresh local cache; it may need a
+browser capture. Supply `--gateway` (or `REIFY_GATEWAY`) to reuse an existing
+server's cache. Supply the same `--goal` as a prior task-scoped compilation to
+resolve that cache key. Remote calls use proper MCP routing/version metadata,
+bootstrap a mount through `reify`, then carry its opaque token on invocation.
+
+## Development bridge
+
+```sh
+export REIFY_BRIDGE_TOKEN='a-long-random-local-development-token'
+reify bridge --port 9099 --session-file ./sessions.json
+```
+
+The bridge binds IPv4 loopback and forwards through the local Reqwest client.
+The session file is optional, limited to 1 MiB, and maps exact domain names to
+explicit `AuthContext` bundles. For example:
+
+```json
+{
+  "api.example.com": {
+    "cookies": {},
+    "authorization_header": "Bearer developer-configured-token",
+    "csrf_tokens": {},
+    "custom_headers": {},
+    "expires_at": null
+  }
+}
+```
+
+The token can also be supplied with `--token`; environment configuration avoids
+shell-history exposure. Neither startup nor `/health` prints the token or session
+credentials. No Chromium-profile database, browser login, keychain, or automatic
+cookie extraction is accessed. See the [bridge guide](../reify-bridge/README.md)
+for the typed `/forward` API, header precedence, and response envelope.
+
+## Terminal and lifecycle behavior
+
+`--color auto|always|never` honors TTY detection and `NO_COLOR` in auto mode.
+The `colored` crate handles styles. Progress appears on **stderr**, only on a real
+terminal and outside CI; it is cleared on success, failure, and cancellation.
+`probe` and `call` stdout contain only JSON, suitable for piping. Broken stdout
+pipes exit successfully. Untrusted tool text has terminal control characters and
+bidirectional overrides removed before human-facing rendering.
+
+`tracing-subscriber` sends logs to stderr with `RUST_LOG` filtering (default warn).
+Argument errors use Clap's usage/error rendering and exit 2; runtime/tool errors
+exit 1; interrupted short operations exit 130. Server shutdown handles Ctrl+C and
+Unix SIGTERM, starts graceful draining, and caps drain time at five seconds. The
+binary then shuts down remaining runtime tasks and waits up to two seconds for
+independent Chromium reapers, so cancellation cannot simply abandon their
+SIGTERM/SIGKILL/profile-cleanup work at process exit.
+
+## Verification
+
+Tests cover subcommands/defaults/options, URL and JSON-object validation, goal words
+that match command names, clean subprocess errors, configuration/header output,
+terminal sanitization, cancellation signaling, and browser profile cleanup before
+binary exit. The bridge has separate in-process HTTP tests requiring no TCP socket.
+
+```sh
+cargo test -p reify-cli -p reify-bridge
+cargo test --workspace
+```
+
+The complete suite also requires permission to bind loopback sockets and fetch
+new Cargo dependencies. See [workspace verification notes](../../VALIDATION.md)
+for the current environment's results and limitations.

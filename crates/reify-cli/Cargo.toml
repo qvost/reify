@@ -1,0 +1,27 @@
+[package]
+name = "reify-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Developer CLI for compiling live sites into stateless MCP tools"
+
+[[bin]]
+name = "reify"
+path = "src/main.rs"
+
+[dependencies]
+reify-core = { path = "../reify-core" }
+reify-probe = { path = "../reify-probe" }
+reify-synth = { path = "../reify-synth" }
+reify-server = { path = "../reify-server" }
+reify-bridge = { path = "../reify-bridge" }
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+url.workspace = true
+thiserror.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+colored = "2.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

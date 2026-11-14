@@ -1,0 +1,24 @@
+[package]
+name = "reify-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Managed Chromium network capture over direct CDP"
+
+[dependencies]
+reify-core = { path = "../reify-core" }
+tokio = { workspace = true, features = ["full", "process"] }
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
