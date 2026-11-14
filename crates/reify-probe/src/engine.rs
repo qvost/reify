@@ -4,6 +4,7 @@ use crate::{
     cdp::{CdpClient, CdpEvent},
     failure, filter,
     process::ChromiumProcess,
+    ssr::SsrProbe,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -25,7 +26,7 @@ const MAX_FRAMES: usize = 512;
 const MAX_BODY: usize = 1024 * 1024;
 /// Result of one isolated navigation and network observation window.
 pub struct ProbeOutput {
-    /// Completed, filtered exchanges in request-start order.
+    /// Completed API exchanges or derived SSR snapshots, in source order.
     pub frames: Vec<CapturedFrame>,
     /// Scoped credentials, never logged.
     pub auth: AuthContext,
@@ -36,10 +37,12 @@ pub struct ProbeOutput {
     /// Elapsed wall time, including startup and extraction.
     pub duration_ms: u64,
 }
-/// Stateless probe configuration. Clone freely; every call owns separate resources.
+/// Cloneable configuration with a cookie-free HTTP pool. Browser fallback owns
+/// separate process/profile resources for each call.
 #[derive(Default, Clone)]
 pub struct ProbeEngine {
     binary: Option<PathBuf>,
+    ssr: SsrProbe,
 }
 impl ProbeEngine {
     /// Use automatic Chromium discovery.
@@ -50,23 +53,42 @@ impl ProbeEngine {
     pub fn with_chromium(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: Some(binary.into()),
+            ssr: SsrProbe::default(),
         }
     }
-    /// Observe until page load plus 750ms network quiet, bounded by `timeout`.
-    /// Timeout is a hard budget for startup/navigation/extraction; it returns an
-    /// error rather than silently returning an incomplete credential snapshot.
+    /// Extract embedded SSR JSON first; otherwise observe Chromium until page load
+    /// plus 750ms network quiet. One deadline covers both paths. SSR gets at most
+    /// 500ms or a quarter of the budget, leaving time for browser fallback.
     pub async fn probe(
         &self,
         target: &Target,
         timeout: Duration,
     ) -> Result<ProbeOutput, ReifyError> {
+        self.probe_with_ssr(target, timeout, self.ssr.probe(target))
+            .await
+    }
+    async fn probe_with_ssr(
+        &self,
+        target: &Target,
+        timeout: Duration,
+        fast_path: impl std::future::Future<Output = Option<ProbeOutput>>,
+    ) -> Result<ProbeOutput, ReifyError> {
         if timeout.is_zero() {
             return Err(failure("probe", "deadline exceeded"));
         }
         Target::new(target.url.as_str(), target.goal.clone())?;
-        tokio::time::timeout(timeout, self.run(target))
-            .await
-            .map_err(|_| failure("probe", "deadline exceeded"))?
+        let started = Instant::now();
+        tokio::time::timeout(timeout, async {
+            let budget = (timeout / 4).min(Duration::from_millis(500));
+            let mut output = match tokio::time::timeout(budget, fast_path).await {
+                Ok(Some(output)) => output,
+                _ => self.run(target).await?,
+            };
+            output.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            Ok(output)
+        })
+        .await
+        .map_err(|_| failure("probe", "deadline exceeded"))?
     }
     async fn run(&self, target: &Target) -> Result<ProbeOutput, ReifyError> {
         let started = Instant::now();
@@ -444,5 +466,88 @@ mod ownership_tests {
                 .as_ptr(),
             body
         );
+    }
+}
+
+#[cfg(test)]
+mod ssr_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[tokio::test]
+    async fn ssr_hit_returns_state_without_ever_starting_chromium() {
+        let engine = ProbeEngine::with_chromium("/missing/reify-test-chromium");
+        let target = Target::new("https://example.com/items", None).unwrap();
+        let frame = CapturedFrame {
+            id: Uuid::new_v4(),
+            url: target.url.clone(),
+            method: "GET".into(),
+            request_headers: HashMap::new(),
+            request_body: None,
+            status_code: 200,
+            response_headers: HashMap::from([("content-type".into(), "application/json".into())]),
+            response_body: Some(json!({"items":[1]})),
+            timestamp: Utc::now(),
+            resource_type: ResourceType::Other,
+        };
+        let ready = std::future::ready(Some(ProbeOutput {
+            frames: vec![frame],
+            auth: AuthContext::default(),
+            final_url: target.url.clone(),
+            page_title: Some("Items".into()),
+            duration_ms: u64::MAX,
+        }));
+        let output = engine
+            .probe_with_ssr(&target, Duration::from_secs(1), ready)
+            .await
+            .unwrap();
+        assert_eq!(output.frames[0].response_body, Some(json!({"items":[1]})));
+        assert_eq!(output.final_url, target.url);
+        assert_eq!(output.page_title.as_deref(), Some("Items"));
+        assert!(output.duration_ms < u64::MAX);
+    }
+    #[tokio::test]
+    async fn ssr_misses_and_timeouts_fall_back_and_cancel_the_http_future() {
+        struct Cancelled(Arc<AtomicBool>);
+        impl Drop for Cancelled {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let engine = ProbeEngine::with_chromium("/missing/reify-test-chromium");
+        let target = Target::new("https://example.com", None).unwrap();
+        let miss = engine
+            .probe_with_ssr(&target, Duration::from_secs(1), std::future::ready(None))
+            .await
+            .err()
+            .unwrap();
+        assert!(miss.to_string().contains("spawn Chromium"));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = cancelled.clone();
+        let slow = async move {
+            let _guard = Cancelled(cancellation);
+            std::future::pending::<Option<ProbeOutput>>().await
+        };
+        let timeout = engine
+            .probe_with_ssr(&target, Duration::from_millis(100), slow)
+            .await
+            .err()
+            .unwrap();
+        assert!(timeout.to_string().contains("spawn Chromium"));
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn zero_deadline_does_not_poll_the_http_path() {
+        let engine = ProbeEngine::new();
+        let target = Target::new("https://example.com", None).unwrap();
+        let result = engine
+            .probe_with_ssr(&target, Duration::ZERO, async {
+                panic!("zero-budget HTTP future was polled")
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

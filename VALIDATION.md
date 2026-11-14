@@ -1,16 +1,20 @@
 # Verification record
 
 All six workspace members and the final requested CLI dependencies compile.
-The performance audit adds nine regression tests; no tests were disabled or
-made to accept a production failure.
+The performance audit adds nine regression tests and SSR extraction adds twelve;
+no tests were disabled or made to accept a production failure.
 
 ## Completed checks
 
 - `cargo test --workspace --offline --no-run` compiles every workspace test.
 - `cargo clippy --workspace --all-targets --offline -- -D warnings` passes.
 - `cargo fmt --all --check` passes.
-- The workspace run excluding only the six TCP fixtures below passes **77 tests**:
-  bridge 6, CLI 7, core 21, probe 13, server 17, synth 13.
+- The workspace run excluding only the six TCP fixtures below passes **89 tests**:
+  bridge 6, CLI 7, core 21, probe 25, server 17, synth 13.
+- SSR tests cover all four state markers, conservative HTML/JavaScript scanning,
+  request headers and redirects, streamed body limits, final-response auth,
+  browser bypass, timeout cancellation, and Chromium fallback. HTTP dispatch is
+  tested in process; live SSR network latency is unverified.
 - A real process-level CLI failure fixture confirms browser children and their
   temporary profiles are reaped before binary exit.
 - The release-built Axum fixture checks successful routing, complete response

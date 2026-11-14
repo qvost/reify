@@ -1445,9 +1445,14 @@ name = "reify-probe"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
  "libc",
+ "memchr",
  "reify-core",
  "reqwest",
  "serde",
