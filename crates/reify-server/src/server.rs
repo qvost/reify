@@ -134,10 +134,10 @@ impl State {
     }
     pub fn gate(&self, key: CacheKey) -> Arc<AsyncMutex<()>> {
         let mut gates = self.gates.lock().expect("mount gate mutex");
-        gates.retain(|_, gate| gate.strong_count() > 0);
         if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
             return gate;
         }
+        gates.retain(|_, gate| gate.strong_count() > 0);
         let gate = Arc::new(AsyncMutex::new(()));
         gates.insert(key, Arc::downgrade(&gate));
         gate
@@ -153,6 +153,11 @@ impl State {
         token.to_string()
     }
     pub fn resolve(&self, token: &str) -> Option<CacheKey> {
+        // Every minted token is a hyphenated UUID. Reject oversized metadata
+        // before hashing it while holding the registry lock.
+        if token.len() != 36 {
+            return None;
+        }
         self.mounts
             .lock()
             .expect("mount registry mutex")

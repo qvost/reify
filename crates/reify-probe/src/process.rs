@@ -145,6 +145,32 @@ pub fn devtools_endpoint(line: &str) -> Option<Url> {
 impl ChromiumProcess {
     /// Launch with a fresh profile and wait at most ten seconds for DevTools.
     pub async fn launch(binary: &Path) -> Result<Self, ReifyError> {
+        Self::launch_optional(Some(binary.to_owned())).await
+    }
+    pub(crate) async fn discover_and_launch() -> Result<Self, ReifyError> {
+        Self::launch_optional(None).await
+    }
+    async fn launch_optional(binary: Option<PathBuf>) -> Result<Self, ReifyError> {
+        // The blocking closure owns its process guard. If the await is canceled,
+        // dropping the detached task's output still terminates/reaps its child.
+        let (mut process, rx) = tokio::task::spawn_blocking(move || {
+            let binary = match binary {
+                Some(binary) => binary,
+                None => discover()?,
+            };
+            Self::spawn(&binary)
+        })
+        .await
+        .map_err(|_| failure("Chromium launch", "blocking worker failed"))??;
+        process.endpoint = Some(
+            tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .map_err(|_| failure("Chromium startup", "DevTools timeout"))?
+                .map_err(|_| failure("Chromium startup", "exited without a DevTools endpoint"))?,
+        );
+        Ok(process)
+    }
+    fn spawn(binary: &Path) -> Result<(Self, oneshot::Receiver<Url>), ReifyError> {
         let profile = std::env::temp_dir().join(format!("reify-chromium-{}", uuid::Uuid::new_v4()));
         let mut directory = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -226,13 +252,7 @@ impl ChromiumProcess {
                 }
             }
         });
-        process.endpoint = Some(
-            tokio::time::timeout(Duration::from_secs(10), rx)
-                .await
-                .map_err(|_| failure("Chromium startup", "DevTools timeout"))?
-                .map_err(|_| failure("Chromium startup", "exited without a DevTools endpoint"))?,
-        );
-        Ok(process)
+        Ok((process, rx))
     }
     /// Announced endpoint; discovery uses its port with `/json/version`.
     pub fn endpoint(&self) -> &Url {

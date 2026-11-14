@@ -1,40 +1,53 @@
 # Verification record
 
-The implementation includes all six workspace members and the `reify` binary.
-No production placeholder macros or simulated browser/network implementations
-are used. Test transports are explicitly injected and perform in-process HTTP
-request/response dispatch.
+All six workspace members and the final requested CLI dependencies compile.
+The performance audit adds nine regression tests; no tests were disabled or
+made to accept a production failure.
 
-## Completed checks in this sandbox
+## Completed checks
 
-Before the final requested `colored` and `tracing-subscriber` wiring:
+- `cargo test --workspace --offline --no-run` compiles every workspace test.
+- `cargo clippy --workspace --all-targets --offline -- -D warnings` passes.
+- `cargo fmt --all --check` passes.
+- The workspace run excluding only the six TCP fixtures below passes **77 tests**:
+  bridge 6, CLI 7, core 21, probe 13, server 17, synth 13.
+- A real process-level CLI failure fixture confirms browser children and their
+  temporary profiles are reaped before binary exit.
+- The release-built Axum fixture checks successful routing, complete response
+  bodies, and equivalent tools. Its measurements and scope are in
+  [PERFORMANCE.md](PERFORMANCE.md).
 
-- `cargo test --workspace --offline --no-run` compiled every workspace test.
-- All seven CLI tests and all five bridge tests passed.
-- `cargo clippy -p reify-cli -p reify-bridge --all-targets --offline -- -D warnings`
-  passed after the shared credential/mount and browser cleanup changes.
-- Core's 19 tests, the probe's two internal tests and nine non-socket integration
-  tests, and the server's four internal/ten non-socket integration tests passed.
-- The process-level CLI diagnostic failure fixture verified that a fake Chromium
-  child and its temporary profile were reaped before binary exit.
-- Formatting and no-dependency workspace metadata checks passed.
+## Environment restriction
 
-## Environment restrictions
+`cargo test --workspace` does **not** pass in this sandbox. The OS rejects TCP
+listener binding with `EPERM` / `Operation not permitted`. The same failures
+were reproduced before this audit. The workspace run stops at the probe's two
+socket fixtures; a separate `cargo test -p reify-server` confirms its four TCP
+fixtures fail at the same mock-listener bind, before executing tested behavior:
 
-`cargo test --workspace` was run and failed, so full success is **not** claimed.
-The sandbox denies TCP socket creation with EPERM. Six existing network tests
-failed at mock-listener binding: two in reify-probe and four in reify-server.
-Those tests remain enabled and unchanged in purpose; production behavior was not
-weakened to make this environment pass.
+- `loopback_http_discovers_websocket`
+- `socket_correlates_out_of_order_replies_and_reports_disconnect`
+- `test_tool_execution_proxy`
+- `test_drift_detection_and_self_healing`
+- `schema_404_rebuilds_without_retrying_the_upstream_mutation`
+- `invalid_arguments_and_missing_mount_never_touch_upstream`
 
-The final CLI also uses the requested `colored = "2.1"` and
-`tracing-subscriber = "0.3"` packages. Neither is cached here. A final online Cargo
-attempt failed because index.crates.io cannot resolve; offline Cargo stops at
-missing `colored`. Thus the final color/logging dependency set, lockfile update,
-and whole-workspace run still require a normal Cargo network environment.
-The earlier passing checks do not establish a full final-configuration test pass.
+Those tests remain enabled. A complete test pass, live Chromium capture, real
+HTTP connection reuse, and production latency remain unverified here.
 
-## Re-run outside the restricted sandbox
+The explicit reduced run used for this environment is:
+
+```sh
+cargo test --workspace --offline -- \
+  --skip loopback_http_discovers_websocket \
+  --skip socket_correlates_out_of_order_replies_and_reports_disconnect \
+  --skip test_tool_execution_proxy \
+  --skip test_drift_detection_and_self_healing \
+  --skip schema_404_rebuilds_without_retrying_the_upstream_mutation \
+  --skip invalid_arguments_and_missing_mount_never_touch_upstream
+```
+
+## Re-run with TCP access
 
 ```sh
 cargo test --workspace
@@ -42,7 +55,5 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-A real Chromium installation is additionally needed for live-site smoke tests.
-Cold compilation timing is observed rather than guaranteed; no universal <2s
-claim is made. The gateway's <10ms cache test is a small-fixture smoke budget,
-not a production latency guarantee.
+A Chromium installation and network access are additionally needed for live-site
+smoke tests. No universal cold compilation or network latency guarantee is made.

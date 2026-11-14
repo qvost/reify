@@ -51,13 +51,14 @@ impl SessionStore {
                 ))
             })
             .collect::<Result<_, ReifyError>>()?;
-        self.entries.write().await.insert(
+        let previous = self.entries.write().await.insert(
             domain,
             Arc::new(Session {
                 auth,
                 headers: Arc::new(headers),
             }),
         );
+        drop(previous);
         Ok(())
     }
     /// Read a nonexpired bundle. Invalid names and expired bundles return None.
@@ -84,7 +85,61 @@ impl SessionStore {
     /// Remove a configured bundle.
     pub async fn remove(&self, domain: &str) -> Result<(), ReifyError> {
         let domain = normalize_domain(domain)?;
-        self.entries.write().await.remove(&domain);
+        let previous = self.entries.write().await.remove(&domain);
+        drop(previous);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn prepared_headers_keep_exact_host_scope_and_replacement_semantics() {
+        let store = SessionStore::new();
+        let context = AuthContext {
+            authorization_header: Some("Bearer first".into()),
+            ..Default::default()
+        };
+        store.insert("EXAMPLE.com.", context).await.unwrap();
+        let first = store
+            .headers_for(&url::Url::parse("https://example.com./api").unwrap())
+            .await
+            .unwrap();
+        let second = store
+            .headers_for(&url::Url::parse("https://example.com").unwrap())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first["authorization"], "Bearer first");
+        assert!(
+            store
+                .headers_for(&url::Url::parse("https://api.example.com").unwrap())
+                .await
+                .is_none()
+        );
+        store
+            .insert(
+                "example.com",
+                AuthContext {
+                    authorization_header: Some("Bearer second".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let updated = store
+            .headers_for(&url::Url::parse("https://example.com").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(updated["authorization"], "Bearer second");
+        assert_eq!(first["authorization"], "Bearer first");
+        store.insert("[::1]", AuthContext::default()).await.unwrap();
+        assert!(
+            store
+                .headers_for(&url::Url::parse("http://[::1]:9090").unwrap())
+                .await
+                .is_some()
+        );
     }
 }

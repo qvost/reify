@@ -112,15 +112,24 @@ impl McpRequest {
             .as_mut()
             .and_then(Value::as_object_mut)
             .ok_or_else(|| McpError::ProtocolViolation("missing tool call params".into()))?;
-        let mut call = serde_json::Map::new();
-        if let Some(name) = params.remove("name") {
-            call.insert("name".into(), name);
-        }
-        if let Some(arguments) = params.remove("arguments") {
-            call.insert("arguments".into(), arguments);
-        }
-        serde_json::from_value(Value::Object(call))
-            .map_err(|e| McpError::ProtocolViolation(format!("invalid tool call params: {e}")))
+        let name = match params.remove("name") {
+            Some(Value::String(name)) => name,
+            _ => {
+                return Err(McpError::ProtocolViolation(
+                    "tool name must be a string".into(),
+                ));
+            }
+        };
+        let arguments = match params.remove("arguments") {
+            None => serde_json::Map::new(),
+            Some(Value::Object(arguments)) => arguments,
+            _ => {
+                return Err(McpError::ProtocolViolation(
+                    "tool arguments must be an object".into(),
+                ));
+            }
+        };
+        Ok(ToolCallParams { name, arguments })
     }
     /// Extract a typed call; omitted arguments become an empty object.
     pub fn extract_tool_call(&self) -> Result<ToolCallParams, McpError> {

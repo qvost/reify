@@ -441,3 +441,30 @@ fn methods_case_and_percent_encoded_path_arguments_are_preserved() {
     let request = render(&tool, &json!({"item_id":"%2e%2e/{x}"})).unwrap();
     assert_eq!(request.url.path(), "/items/%252e%252e%2F%7Bx%7D");
 }
+
+#[test]
+fn prepared_rendering_preserves_types_order_and_borrows_body() {
+    let frames = vec![frame(
+        "https://example.com/users/123?tag=a&tag=b",
+        "POST",
+        Some(json!({"nested":{"x":1}})),
+        json!({}),
+    )];
+    let clusters = cluster_frames(&frames);
+    let tool = compile(&clusters[0], &AuthContext::default(), "update_user".into()).unwrap();
+    let prepared = reify_synth::compiler::PreparedTool::new(&tool).unwrap();
+    for id in ["456/a", "a%2e%2e", "{other}"] {
+        let arguments = json!({"user_id":id,"tag":["b b","a&b"],"body":{"nested":{"x":3}}});
+        let expected = render(&tool, &arguments).unwrap();
+        let actual = prepared.render(&arguments).unwrap();
+        assert_eq!(actual.url, expected.url);
+        assert_eq!(actual.method, expected.method);
+        assert_eq!(actual.body, expected.body.as_ref());
+        assert!(std::ptr::eq(actual.body.unwrap(), &arguments["body"]));
+    }
+    assert!(
+        prepared
+            .render(&json!({"user_id":"..","tag":[],"body":{"nested":{"x":1}}}))
+            .is_err()
+    );
+}

@@ -94,12 +94,14 @@ synth schemas currently do not emit these annotations.
 
 ## Cache concurrency
 
-`ServerStore` uses `Arc<RwLock<HashMap<CacheKey, Arc<CachedApp>>>>`. The nested Arc
-intentionally refines the requested value layout to avoid copying tools, schemas,
-and credentials while holding the read lock. `get` still returns an owned
-`CachedApp`; `snapshot` is the hot-path API and clones only the Arc. This is a
-short read lock, not a lock-free algorithm. Reads never await probing, synthesis,
-or upstream traffic while holding the store lock.
+`ServerStore` uses a short Tokio read/write lock around immutable stored
+generations. `get` returns an owned `CachedApp`; `snapshot` shares its Arc, while
+`prepared` shares generation-bound validators, ordered execution plans, mirror
+annotations, encoded credentials, and compact tool-definition JSON. Preparation
+runs on a blocking worker before acquiring the write lock. Retired schema and
+validator graphs are dropped after unlocking. Repeated list/bootstrap requests
+serialize borrowed wire views; tool execution borrows request bodies. This is not
+a lock-free algorithm. No cache lock spans probing, synthesis, or upstream I/O.
 
 Freshness uses monotonic `created_at` and `ttl`, capped by any known credential
 expiry. Stale snapshots are not served. New inserts prune unrelated expired
@@ -120,8 +122,10 @@ server instances or add a host-level capacity policy.
 
 The warm-route test times five successful in-process bootstrap cache hits and
 checks a median below 10ms. It is a small-fixture smoke budget, not a universal
-latency guarantee or a production benchmark. The full HTTP suite has not run in
-this environment because Axum cannot be fetched; no measured latency is claimed.
+latency guarantee or a production benchmark. See the root
+[performance audit](../../PERFORMANCE.md) for a larger-schema warm route fixture
+and [verification record](../../VALIDATION.md) for the TCP tests blocked by this
+environment.
 
 ## Proxy execution
 

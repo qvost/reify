@@ -32,11 +32,18 @@ and Runtime before navigating. See the canonical
 
 One socket actor handles command correlation, interleaved events, ping/pong, and
 closure. Each command has a five-second deadline, including queue submission.
-Canceled command receivers are pruned before accepting further commands. Queues
+Canceled command receivers are pruned when the pending-command limit is reached. Queues
 are bounded (64 submitted commands, 256 awaiting replies, 1024 events); overflowing
 the event queue terminates the connection and reports failure rather than silently
 losing traffic. Socket messages are limited to 8 MiB. Dropping the client aborts
 the actor and releases the socket and pending receivers.
+
+The probe's socket parser borrows envelope strings and raw parameters while
+skipping events it does not consume. Retained event payloads are decoded into
+owned values, then moved into capture frames where possible. General CDP clients
+retain the full event stream. Filesystem discovery/process spawning run off the
+async executor, and the three independent enable commands run concurrently before
+navigation. The stderr reader reuses its buffer throughout the browser lifetime.
 
 The overall probe timeout covers launch, setup, observation, page inspection, and
 cookie extraction. A zero budget starts no browser. Observation completes after

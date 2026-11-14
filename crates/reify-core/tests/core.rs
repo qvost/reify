@@ -635,3 +635,66 @@ fn root_slashes_and_all_cache_scope_variants() {
         assert_eq!(serde_json::to_value(scope).unwrap(), wire);
     }
 }
+
+#[test]
+fn owned_call_extraction_retains_metadata_and_wire_definitions_match() {
+    let mut req = request("tools/call", Some("weather"));
+    let expected = req.extract_tool_call().unwrap();
+    let pointer = req.params.as_ref().unwrap()["arguments"]["city"]
+        .as_str()
+        .unwrap()
+        .as_ptr();
+    let actual = req.take_tool_call().unwrap();
+    assert_eq!(actual.arguments["city"].as_str().unwrap().as_ptr(), pointer);
+    assert_eq!(actual, expected);
+    assert!(req.params.as_ref().unwrap().get("_meta").is_some());
+    assert!(req.params.as_ref().unwrap().get("arguments").is_none());
+    let definition:ToolDefinition=serde_json::from_value(json!({"name":"search","description":"Unicode 世界 and quotes \"","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}},"metadata":{"tags":["api"],"sourceEndpoint":"https://example.com/api"}})).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(definition.to_mcp_json().unwrap().get()).unwrap(),
+        definition.to_mcp_value().unwrap()
+    );
+    let result = ToolCallResult {
+        content: vec![
+            ContentBlock::Text {
+                text: "a\n世界".into(),
+            },
+            ContentBlock::Json {
+                json: json!({"x":[1,null,true]}),
+            },
+            ContentBlock::Resource {
+                resource: ResourceContent {
+                    uri: "file:///a".into(),
+                    mime_type: None,
+                    text: "hello".into(),
+                },
+            },
+        ],
+        is_error: true,
+        cache_hint: Some(CacheHint {
+            ttl_ms: 0,
+            cache_scope: CacheScope::Domain,
+            revalidate_in_background: true,
+        }),
+    };
+    assert_eq!(
+        result.to_mcp_value().unwrap(),
+        result.into_mcp_value().unwrap()
+    );
+}
+#[test]
+fn goal_normalization_preserves_contextual_unicode_lowercase() {
+    for goal in [
+        "  SEARCH\tITEMS\n",
+        " ΟΣ \t İСТАНБУЛ  ",
+        "\u{2003} A\u{00a0} B ",
+        "",
+    ] {
+        let expected = goal
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert_eq!(normalize_goal(goal), expected);
+    }
+}

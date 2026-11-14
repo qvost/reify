@@ -2,9 +2,10 @@
 use crate::failure;
 use futures_util::{SinkExt, StreamExt};
 use reify_core::ReifyError;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -83,11 +84,15 @@ pub fn parse_message(text: &str) -> Result<Incoming, ReifyError> {
     }
 }
 #[derive(Deserialize)]
+#[serde(transparent)]
+struct WireString<'a>(#[serde(borrow)] Cow<'a, str>);
+#[derive(Deserialize)]
 struct FilteredWire<'a> {
     id: Option<Value>,
-    method: Option<String>,
-    #[serde(rename = "sessionId")]
-    session_id: Option<String>,
+    #[serde(borrow)]
+    method: Option<WireString<'a>>,
+    #[serde(rename = "sessionId", borrow)]
+    session_id: Option<WireString<'a>>,
     #[serde(default, borrow)]
     params: Option<&'a serde_json::value::RawValue>,
     #[serde(default, deserialize_with = "present")]
@@ -111,8 +116,9 @@ fn parse_filtered(text: &str, methods: &[&str]) -> Result<Option<Incoming>, Reif
     }
     let method = wire
         .method
-        .ok_or_else(|| failure("CDP event", "missing method"))?;
-    if !methods.contains(&method.as_str()) {
+        .ok_or_else(|| failure("CDP event", "missing method"))?
+        .0;
+    if !methods.contains(&method.as_ref()) {
         return Ok(None);
     }
     let params = wire
@@ -121,14 +127,22 @@ fn parse_filtered(text: &str, methods: &[&str]) -> Result<Option<Incoming>, Reif
         .transpose()?
         .unwrap_or(Value::Null);
     Ok(Some(Incoming::Event(CdpEvent {
-        method,
+        method: method.into_owned(),
         params,
-        session_id: wire.session_id,
+        session_id: wire.session_id.map(|session| session.0.into_owned()),
     })))
+}
+#[derive(Serialize)]
+struct CommandMessage<'a> {
+    id: u64,
+    method: &'a str,
+    params: &'a Value,
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    session: Option<&'a str>,
 }
 struct Call {
     id: u64,
-    payload: Value,
+    payload: String,
     reply: oneshot::Sender<Result<Value, ReifyError>>,
 }
 /// Command handle owning a socket actor. Drop aborts the actor and closes its socket.
@@ -215,7 +229,7 @@ impl CdpClient {
                         let Some(call) = call else { break; };
                         if pending.len()>=256 {pending.retain(|_, sender| !sender.is_closed());}
                         if pending.len() >= 256 { let _ = call.reply.send(Err(failure("CDP", "too many pending commands"))); continue; }
-                        let message = Message::Text(call.payload.to_string());
+                        let message = Message::Text(call.payload);
                         pending.insert(call.id, call.reply);
                         if !matches!(tokio::time::timeout(Duration::from_secs(5), socket.send(message)).await, Ok(Ok(()))) { break; }
                     }
@@ -260,10 +274,12 @@ impl CdpClient {
         session: Option<&str>,
     ) -> Result<Value, ReifyError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut payload = json!({"id":id,"method":method,"params":params});
-        if let Some(session) = session {
-            payload["sessionId"] = json!(session);
-        }
+        let payload = serde_json::to_string(&CommandMessage {
+            id,
+            method,
+            params: &params,
+            session,
+        })?;
         let (reply, response) = oneshot::channel();
         tokio::time::timeout(Duration::from_secs(5), async {
             self.commands
@@ -281,5 +297,62 @@ impl CdpClient {
 impl Drop for CdpClient {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    #[test]
+    fn probe_filter_keeps_replies_nulls_and_selected_events_in_any_key_order() {
+        let methods = ["Network.loadingFinished"];
+        let envelope: FilteredWire<'_> = serde_json::from_str(
+            r#"{"params":{"many":[1,2,3]},"method":"Runtime.consoleAPICalled","sessionId":"page"}"#,
+        )
+        .unwrap();
+        assert!(matches!(envelope.method.unwrap().0, Cow::Borrowed(_)));
+        assert!(matches!(envelope.session_id.unwrap().0, Cow::Borrowed(_)));
+        assert!(matches!(
+            parse_filtered(r#"{"method":"Network.\u006coadingFinished","params":{},"sessionId":"pa\u0067e"}"#, &methods).unwrap(),
+            Some(Incoming::Event(CdpEvent { method, session_id: Some(session), .. }))
+                if method == methods[0] && session == "page"
+        ));
+        assert!(
+            parse_filtered(
+                r#"{"params":{"many":[1,2,3]},"method":"Runtime.consoleAPICalled"}"#,
+                &methods
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            parse_filtered(r#"{"result":null,"sessionId":"page","id":1}"#, &methods).unwrap(),
+            Some(Incoming::Reply(1, Ok(Value::Null)))
+        ));
+        let wire =
+            r#"{"params":{"requestId":"r"},"sessionId":"page","method":"Network.loadingFinished"}"#;
+        match (
+            parse_filtered(wire, &methods).unwrap().unwrap(),
+            parse_message(wire).unwrap(),
+        ) {
+            (Incoming::Event(a), Incoming::Event(b)) => {
+                assert_eq!(a.method, b.method);
+                assert_eq!(a.params, b.params);
+                assert_eq!(a.session_id, b.session_id);
+            }
+            _ => panic!("expected matching events"),
+        }
+        assert!(
+            parse_filtered(r#"{"id":1}"#, &methods)
+                .unwrap()
+                .is_some_and(|m| matches!(m, Incoming::Reply(1, Err(_))))
+        );
+        assert!(
+            parse_filtered(
+                r#"{"method":"Runtime.consoleAPICalled","params":[}"#,
+                &methods
+            )
+            .is_err()
+        );
     }
 }

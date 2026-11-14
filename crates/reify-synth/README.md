@@ -134,6 +134,12 @@ pairs are appended in sorted argument-name order with form URL encoding; repeate
 values preserve array order. Optional arguments are omitted rather than replaced
 with captured defaults. Explicit JSON null remains a real body.
 
+Repeated executors can retain `compiler::PreparedTool` to compile schema validation
+and query ordering once. Its `render` method borrows the method/body and allocates
+the rendered URL without retaining arguments between calls. Rebuild the prepared
+tool when its definition changes. The one-shot `compiler::render` API continues
+to return an owned request.
+
 Auth requirements contain sorted, deduplicated key names only: `cookie` when any
 cookies exist, `authorization` when provided, and lowercase keys from CSRF/custom
 header maps. Credentials never become input defaults or schema examples. These

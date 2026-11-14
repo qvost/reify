@@ -188,3 +188,39 @@ pub(crate) fn invalid_cache(id: Value) -> Response {
         "Invalid cached tool schema",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn borrowed_wire_matches_owned_results_without_losing_json_escaping() {
+        let id = serde_json::json!("id \" 世界");
+        let ttl = Duration::from_millis(123);
+        let scope = CacheScope::Domain;
+        let raw = crate::handler::meta_tool().to_mcp_json().unwrap();
+        let definitions = vec![raw];
+        let response = list(&id, &definitions, ttl, scope);
+        assert_eq!(response.headers()["mcp-cache-scope"], "domain");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["id"], id);
+        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(value["result"]["ttlMs"], 123);
+        let response = bootstrap(&id, &definitions, "token", Some("reify"), ttl, scope);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["result"]["structuredContent"]["tools"][0],
+            crate::handler::meta_tool().to_mcp_value().unwrap()
+        );
+        assert_eq!(
+            value["result"]["_meta"]["reify/cacheHint"]["cacheScope"],
+            "domain"
+        );
+        assert_eq!(value["result"]["isError"], false);
+    }
+}

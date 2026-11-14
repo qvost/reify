@@ -3,7 +3,7 @@ use crate::{
     auth::{AuthExtractor, BrowserCookie},
     cdp::{CdpClient, CdpEvent},
     failure, filter,
-    process::{self, ChromiumProcess},
+    process::ChromiumProcess,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -70,11 +70,10 @@ impl ProbeEngine {
     }
     async fn run(&self, target: &Target) -> Result<ProbeOutput, ReifyError> {
         let started = Instant::now();
-        let binary = match &self.binary {
-            Some(p) => p.clone(),
-            None => process::discover()?,
+        let process = match &self.binary {
+            Some(binary) => ChromiumProcess::launch(binary).await?,
+            None => ChromiumProcess::discover_and_launch().await?,
         };
-        let process = ChromiumProcess::launch(&binary).await?;
         let mut cdp = CdpClient::discover_for_probe(
             process
                 .endpoint()
@@ -127,10 +126,11 @@ impl ProbeEngine {
             let quiet = last_activity + Duration::from_millis(750);
             tokio::select! {
                 event = events.recv() => {
-                    let event = event.ok_or_else(|| failure("CDP events", "socket closed or event queue overflowed"))?;
+                    let mut event = event.ok_or_else(|| failure("CDP events", "socket closed or event queue overflowed"))?;
                     if event.session_id.as_deref() != Some(session) { continue; }
                     if event.method == "Page.loadEventFired" { loaded = true; last_activity = tokio::time::Instant::now(); }
-                    if let Some((sequence, frame)) = capture.event(&event, &target.url) {
+                    let was_pending=!capture.pending.is_empty();
+                    if let Some((sequence, frame)) = capture.event(&mut event, &target.url) {
                         if bodies.len() >= 16 { return Err(failure("capture", "response concurrency limit exceeded")); }
                         let cdp = &cdp;
                         bodies.push(async move {
@@ -138,7 +138,7 @@ impl ProbeEngine {
                             (sequence.0, frame, response)
                         });
                     }
-                    if !capture.pending.is_empty() { last_activity = tokio::time::Instant::now(); }
+                    if was_pending || !capture.pending.is_empty() { last_activity = tokio::time::Instant::now(); }
                 }
                 Some((sequence, mut frame, response)) = bodies.next(), if !bodies.is_empty() => {
                     if let Ok(response) = response { frame.response_body = decode_body(&response); }
@@ -194,15 +194,18 @@ impl ProbeEngine {
         })
     }
 }
-fn headers(value: &Value) -> HashMap<String, String> {
-    value
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_ascii_lowercase(), s.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default()
+fn headers(value: &mut Value) -> HashMap<String, String> {
+    let Value::Object(map) = value.take() else {
+        return HashMap::new();
+    };
+    let mut result = HashMap::with_capacity(map.len());
+    for (mut name, value) in map {
+        if let Value::String(value) = value {
+            name.make_ascii_lowercase();
+            result.insert(name, value);
+        }
+    }
+    result
 }
 fn decode_body(response: &Value) -> Option<Value> {
     let body = response["body"].as_str()?;
@@ -230,25 +233,25 @@ struct Capture {
     next: u64,
 }
 impl Capture {
-    fn event(&mut self, event: &CdpEvent, target: &Url) -> Option<((u64, String), CapturedFrame)> {
-        let p = &event.params;
-        let id = p["requestId"].as_str()?;
+    fn event(
+        &mut self,
+        event: &mut CdpEvent,
+        target: &Url,
+    ) -> Option<((u64, String), CapturedFrame)> {
+        let p = &mut event.params;
+        let id = match p.get_mut("requestId")?.take() {
+            Value::String(id) => id,
+            _ => return None,
+        };
         match event.method.as_str() {
             "Network.requestWillBeSent" => {
                 // Redirects reuse request IDs; never associate an old body or auth
                 // header with a new URL. The final hop becomes the captured exchange.
-                self.pending.remove(id);
+                self.pending.remove(&id);
                 if self.next >= MAX_FRAMES as u64 {
                     return None;
                 }
                 if filter::is_static_type(p["type"].as_str().unwrap_or("")) {
-                    return None;
-                }
-                let r = &p["request"];
-                let url = Url::parse(r["url"].as_str()?).ok()?;
-                if !filter::is_first_party(target, &url)
-                    || filter::is_noise(&url, p["type"].as_str().unwrap_or(""))
-                {
                     return None;
                 }
                 let resource_type = match p["type"].as_str() {
@@ -256,19 +259,42 @@ impl Capture {
                     Some("Fetch") => ResourceType::Fetch,
                     _ => ResourceType::Other,
                 };
-                let request_headers = headers(&r["headers"]);
+                let r = &mut p["request"];
+                let url = Url::parse(r["url"].as_str()?).ok()?;
+                if !filter::is_first_party(target, &url) || filter::is_noise(&url, "") {
+                    return None;
+                }
+                let request_headers = headers(&mut r["headers"]);
                 self.auth.observe_headers(&request_headers, true);
-                let post = r["postData"].as_str().filter(|s| s.len() <= MAX_BODY);
-                let request_body = post.and_then(|s| serde_json::from_str(s).ok()).or_else(|| {
-                    let graphql = request_headers
-                        .get("content-type")
-                        .is_some_and(|m| m.starts_with("application/graphql"));
-                    post.filter(|_| graphql).map(|s| json!({"query":s}))
-                });
+                let post = match r.get_mut("postData").map(Value::take) {
+                    Some(Value::String(post)) if post.len() <= MAX_BODY => Some(post),
+                    _ => None,
+                };
+                let request_body = post
+                    .as_deref()
+                    .and_then(|post| serde_json::from_str(post).ok())
+                    .or_else(|| {
+                        let graphql = request_headers
+                            .get("content-type")
+                            .is_some_and(|mime| mime.starts_with("application/graphql"));
+                        if graphql {
+                            post.map(|post| {
+                                let mut object = serde_json::Map::new();
+                                object.insert("query".into(), Value::String(post));
+                                Value::Object(object)
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                let method = match r.get_mut("method")?.take() {
+                    Value::String(method) => method,
+                    _ => return None,
+                };
                 let frame = CapturedFrame {
                     id: Uuid::new_v4(),
                     url,
-                    method: r["method"].as_str()?.to_owned(),
+                    method,
                     request_headers,
                     request_body,
                     status_code: 0,
@@ -279,28 +305,28 @@ impl Capture {
                 };
                 let sequence = self.next;
                 self.next += 1;
-                self.pending.insert(id.to_owned(), (sequence, frame));
+                self.pending.insert(id, (sequence, frame));
             }
             "Network.responseReceived" => {
-                let (_, frame) = self.pending.get_mut(id)?;
-                let response = &p["response"];
-                frame.response_headers = headers(&response["headers"]);
+                let (_, frame) = self.pending.get_mut(&id)?;
+                let response = &mut p["response"];
+                frame.response_headers = headers(&mut response["headers"]);
                 let status = response["status"].as_f64()?;
                 if !(100.0..=599.0).contains(&status) {
-                    self.pending.remove(id);
+                    self.pending.remove(&id);
                     return None;
                 }
                 frame.status_code = status as u16;
                 self.auth.observe_headers(&frame.response_headers, false);
                 if !filter::is_api(frame, response["mimeType"].as_str().unwrap_or("")) {
-                    self.pending.remove(id);
+                    self.pending.remove(&id);
                 }
             }
             "Network.loadingFailed" => {
-                self.pending.remove(id);
+                self.pending.remove(&id);
             }
             "Network.loadingFinished" => {
-                let (sequence, frame) = self.pending.remove(id)?;
+                let (sequence, frame) = self.pending.remove(&id)?;
                 if frame.status_code == 0 {
                     return None;
                 }
@@ -311,7 +337,7 @@ impl Capture {
                     self.completed.push((sequence, frame));
                     return None;
                 }
-                return Some(((sequence, id.to_owned()), frame));
+                return Some(((sequence, id), frame));
             }
             _ => {}
         }
@@ -339,12 +365,12 @@ mod tests {
                 json!({"requestId":"1","type":"Fetch","request":{"url":url,"method":"POST","headers":{"Authorization":"Bearer test"},"postData":"{\"query\":\"{x}\"}"}}),
             )
         };
-        capture.event(&request("https://example.com/graphql"), &target);
+        capture.event(&mut request("https://example.com/graphql"), &target);
         assert_eq!(capture.pending.len(), 1);
-        capture.event(&event("Network.responseReceived",json!({"requestId":"1","response":{"status":200,"headers":{"Content-Type":"application/json"},"mimeType":"application/json"}})),&target);
+        capture.event(&mut event("Network.responseReceived",json!({"requestId":"1","response":{"status":200,"headers":{"Content-Type":"application/json"},"mimeType":"application/json"}})),&target);
         let (_, frame) = capture
             .event(
-                &event(
+                &mut event(
                     "Network.loadingFinished",
                     json!({"requestId":"1","encodedDataLength":20}),
                 ),
@@ -358,12 +384,12 @@ mod tests {
             Some("Bearer test")
         );
         let mut capture = Capture::default();
-        capture.event(&request("https://example.com/graphql"), &target);
-        capture.event(&request("https://evil.org/graphql"), &target);
+        capture.event(&mut request("https://example.com/graphql"), &target);
+        capture.event(&mut request("https://evil.org/graphql"), &target);
         assert!(capture.pending.is_empty());
-        capture.event(&request("https://example.com/api"), &target);
+        capture.event(&mut request("https://example.com/api"), &target);
         capture.event(
-            &event("Network.loadingFailed", json!({"requestId":"1"})),
+            &mut event("Network.loadingFailed", json!({"requestId":"1"})),
             &target,
         );
         assert!(capture.pending.is_empty());
@@ -381,5 +407,42 @@ mod tests {
         assert!(decode_body(&json!({"body":"%%%","base64Encoded":true})).is_none());
         assert!(decode_body(&json!({"body":"not json"})).is_none());
         assert!(decode_body(&json!({"body":" ".repeat(MAX_BODY+1)})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn intercepted_headers_methods_and_raw_graphql_move_into_the_frame() {
+        let target = Url::parse("https://example.com").unwrap();
+        let mut event = CdpEvent {
+            method: "Network.requestWillBeSent".into(),
+            session_id: None,
+            params: json!({"requestId":"r","type":"Fetch","request":{"url":"https://example.com/graphql","method":"POST","headers":{"Authorization":"Bearer fixture","Content-Type":"application/graphql"},"postData":"query { users { id } }"}}),
+        };
+        let auth = event.params["request"]["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let body = event.params["request"]["postData"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let method = event.params["request"]["method"].as_str().unwrap().as_ptr();
+        let mut capture = Capture::default();
+        capture.event(&mut event, &target);
+        let frame = &capture.pending["r"].1;
+        assert_eq!(frame.request_headers["authorization"], "Bearer fixture");
+        assert!(frame.is_graphql());
+        assert_eq!(frame.request_headers["authorization"].as_ptr(), auth);
+        assert_eq!(frame.method.as_ptr(), method);
+        assert_eq!(
+            frame.request_body.as_ref().unwrap()["query"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            body
+        );
     }
 }

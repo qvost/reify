@@ -10,10 +10,15 @@ impl CacheKey {
     /// ports remain part of the authority. This is a compilation key, not an
     /// authenticated response-cache key; callers must partition private results.
     pub fn from_target(target: &Target) -> Self {
-        let host = target.url.host_str().unwrap_or("");
+        let raw = target.url.host_str().unwrap_or("");
+        let host = if raw.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(raw.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(raw)
+        };
         let domain = match target.url.port() {
             Some(port) => Cow::Owned(format!("{host}:{port}")),
-            None => Cow::Borrowed(host),
+            None => host,
         };
         let goal = normalize_goal(target.goal.as_deref().unwrap_or(""));
         let mut hasher = blake3::Hasher::new();

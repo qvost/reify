@@ -512,3 +512,42 @@ async fn static_mount_header_lists_scoped_tools_without_custom_client_metadata()
             .unwrap();
     assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn prepared_generation_is_reused_replaced_and_never_retains_arguments() {
+    let store = ServerStore::new();
+    let target = Target::new("https://example.test", None).unwrap();
+    let key = CacheKey::from_target(&target);
+    store.insert(key, fixture(target.clone(), 1)).await;
+    let first = store.prepared(&key).await.unwrap().unwrap();
+    let second = store.prepared(&key).await.unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    let args = json!({"item_id":"1","q":"one","body":{"enabled":false}});
+    let rendered = first.renderer(0).unwrap().render(&args).unwrap();
+    assert!(rendered.url.query().unwrap().contains("one"));
+    let args = json!({"item_id":"2","q":"two","body":{"enabled":true}});
+    let rendered = first.renderer(0).unwrap().render(&args).unwrap();
+    assert!(rendered.url.query().unwrap().contains("two"));
+    store.insert(key, fixture(target.clone(), 2)).await;
+    let updated = store.prepared(&key).await.unwrap().unwrap();
+    assert!(!Arc::ptr_eq(&first, &updated));
+    assert_eq!(first.app.tools[0].definition.name, "items_v1");
+    assert_eq!(updated.app.tools[0].definition.name, "items_v2");
+    assert!(
+        !store
+            .replace_if_current(key, &first.app, fixture(target, 3))
+            .await
+    );
+    store.invalidate(&key).await;
+    assert!(store.prepared(&key).await.unwrap().is_none());
+}
+#[tokio::test]
+async fn prepared_argument_validation_rejects_before_any_network_access() {
+    let server = ReifyServer::with_builder(FixtureBuilder::new());
+    let token = mount(&server, "http://example.test").await;
+    let invalid = rpc(
+        "tools/call",
+        json!({"name":"items_v1","arguments":{"item_id":"1","q":"a","body":{"enabled":"wrong"}},"_meta":{"reify/mount":token}}),
+    );
+    assert_eq!(call(&server, invalid).await.2["error"]["code"], -32602);
+}

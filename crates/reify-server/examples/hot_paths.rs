@@ -63,6 +63,26 @@ async fn main() {
         .await;
     let mounted = server.mount(target).await.unwrap();
     assert!(mounted.cache_hit);
+    if std::env::var_os("REIFY_PROFILE").is_some() {
+        // A separate diagnostic run quantifies work formerly performed for every
+        // response. This scope intentionally excludes the route measurements.
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let mut definitions = vec![reify_server::handler::meta_tool().to_mcp_value().unwrap()];
+            definitions.extend(
+                mounted
+                    .app
+                    .tools
+                    .iter()
+                    .map(|tool| tool.definition.to_mcp_value().unwrap()),
+            );
+            black_box(serde_json::to_vec(&definitions).unwrap());
+        }
+        eprintln!(
+            "definition_materialization_ns_per_request={}",
+            start.elapsed().as_nanos() / iterations as u128
+        );
+    }
     let request=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":PROTOCOL_VERSION,"reify/mount":mounted.token}}})).unwrap();
     let router = server.router();
     let mut total = 0usize;
@@ -94,6 +114,12 @@ async fn main() {
                     .len(),
                 64
             );
+            if i == 0
+                && let Some(path) = std::env::var_os("REIFY_DEFINITION_OUT")
+            {
+                std::fs::write(path, serde_json::to_vec(&value["result"]["tools"]).unwrap())
+                    .unwrap();
+            }
         }
         if i > 0 {
             total += elapsed.as_nanos() as usize;

@@ -140,7 +140,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-74 test suites pass across all crates with zero warnings.
+The workspace contains 83 tests. In this sandbox, 77 pass and six TCP fixtures
+are blocked by OS socket restrictions; see [VALIDATION.md](VALIDATION.md).
+The performance audit and scoped release measurements are in
+[PERFORMANCE.md](PERFORMANCE.md).
 
 ---
 

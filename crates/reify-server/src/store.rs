@@ -161,13 +161,27 @@ impl ServerStore {
     /// Prepare off the async executor and install atomically. Expired entries are pruned.
     pub async fn insert(&self, key: CacheKey, app: CachedApp) {
         let entry = StoredApp::build(app).await;
+        // Keep a reference to retired generations until after unlocking: dropping
+        // their validator/schema graphs can otherwise stall every cache reader.
+        let mut retired = Vec::new();
         let mut entries = self.entries.write().await;
-        entries.retain(|_, entry| !entry.app.remaining().is_zero());
-        entries.insert(key, entry);
+        entries.retain(|_, entry| {
+            if entry.app.remaining().is_zero() {
+                retired.push(entry.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let previous = entries.insert(key, entry);
+        drop(entries);
+        drop(previous);
+        drop(retired);
     }
     /// Remove a generation so in-flight healers cannot resurrect it.
     pub async fn invalidate(&self, key: &CacheKey) {
-        self.entries.write().await.remove(key);
+        let previous = self.entries.write().await.remove(key);
+        drop(previous);
     }
     /// Replace only the generation that triggered recovery; newer writes win.
     pub async fn replace_if_current(
@@ -189,9 +203,12 @@ impl ServerStore {
             .get(&key)
             .is_some_and(|entry| Arc::ptr_eq(&entry.app, expected))
         {
-            entries.insert(key, entry);
+            let previous = entries.insert(key, entry);
+            drop(entries);
+            drop(previous);
             true
         } else {
+            drop(entries);
             false
         }
     }
