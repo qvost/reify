@@ -1,5 +1,6 @@
 //! Per-probe orchestration with bounded capture and concurrent response body reads.
 use crate::{
+    action,
     auth::{AuthExtractor, BrowserCookie},
     cdp::{CdpClient, CdpEvent},
     failure, filter,
@@ -56,7 +57,8 @@ impl ProbeEngine {
             ssr: SsrProbe::default(),
         }
     }
-    /// Extract embedded SSR JSON first; otherwise observe Chromium until page load
+    /// Interactive goals use Chromium directly; other goals try SSR JSON first.
+    /// Observe Chromium until page load
     /// plus 750ms network quiet. One deadline covers both paths. SSR gets at most
     /// 500ms or a quarter of the budget, leaving time for browser fallback.
     pub async fn probe(
@@ -80,9 +82,13 @@ impl ProbeEngine {
         let started = Instant::now();
         tokio::time::timeout(timeout, async {
             let budget = (timeout / 4).min(Duration::from_millis(500));
-            let mut output = match tokio::time::timeout(budget, fast_path).await {
-                Ok(Some(output)) => output,
-                _ => self.run(target).await?,
+            let mut output = if action::is_interactive(target.goal.as_deref()) {
+                self.run(target).await?
+            } else {
+                match tokio::time::timeout(budget, fast_path).await {
+                    Ok(Some(output)) => output,
+                    _ => self.run(target).await?,
+                }
             };
             output.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
             Ok(output)
@@ -141,35 +147,31 @@ impl ProbeEngine {
             ));
         }
         let mut capture = Capture::default();
-        let mut bodies = FuturesUnordered::new();
-        let mut loaded = false;
-        let mut last_activity = tokio::time::Instant::now();
-        loop {
-            let quiet = last_activity + Duration::from_millis(750);
-            tokio::select! {
-                event = events.recv() => {
-                    let mut event = event.ok_or_else(|| failure("CDP events", "socket closed or event queue overflowed"))?;
-                    if event.session_id.as_deref() != Some(session) { continue; }
-                    if event.method == "Page.loadEventFired" { loaded = true; last_activity = tokio::time::Instant::now(); }
-                    let was_pending=!capture.pending.is_empty();
-                    if let Some((sequence, frame)) = capture.event(&mut event, &target.url) {
-                        if bodies.len() >= 16 { return Err(failure("capture", "response concurrency limit exceeded")); }
-                        let cdp = &cdp;
-                        bodies.push(async move {
-                            let response = cdp.command("Network.getResponseBody", json!({"requestId":sequence.1}), Some(session)).await;
-                            (sequence.0, frame, response)
-                        });
-                    }
-                    if was_pending || !capture.pending.is_empty() { last_activity = tokio::time::Instant::now(); }
-                }
-                Some((sequence, mut frame, response)) = bodies.next(), if !bodies.is_empty() => {
-                    if let Ok(response) = response { frame.response_body = decode_body(&response); }
-                    // Bodies can be unavailable after eviction or for 204 responses;
-                    // retain the completed request and response metadata in that case.
-                    capture.completed.push((sequence, frame));
-                    last_activity = tokio::time::Instant::now();
-                }
-                _ = tokio::time::sleep_until(quiet), if loaded && capture.pending.is_empty() && bodies.is_empty() => break,
+        capture
+            .observe(&cdp, session, &target.url, &mut events, None)
+            .await?;
+        let needs_action = capture.completed.is_empty()
+            || action::is_interactive(target.goal.as_deref())
+            || target
+                .goal
+                .as_deref()
+                .is_some_and(|goal| !capture.matches_goal(goal));
+        if needs_action
+            && let Some(action) = action::excite(&cdp, session, target.goal.as_deref()).await?
+        {
+            capture.discovery_scope = action.destination;
+            let previous = capture.completed.len();
+            capture
+                .observe(
+                    &cdp,
+                    session,
+                    &target.url,
+                    &mut events,
+                    Some(tokio::time::Instant::now() + Duration::from_millis(750)),
+                )
+                .await?;
+            if capture.completed.len() == previous {
+                tracing::debug!("search excitation produced no additional API frames");
             }
         }
         let page = cdp.command("Runtime.evaluate", json!({"expression":"({url:location.href,title:document.title})","returnByValue":true}), Some(session)).await?;
@@ -253,8 +255,92 @@ struct Capture {
     completed: Vec<(u64, CapturedFrame)>,
     auth: AuthExtractor,
     next: u64,
+    discovery_scope: Option<Url>,
 }
 impl Capture {
+    fn matches_goal(&self, goal: &str) -> bool {
+        fn fields_match(value: &Value, keywords: &[&str], depth: usize) -> bool {
+            if depth >= 64 {
+                return false;
+            }
+            match value {
+                Value::Object(fields) => fields.iter().any(|(name, value)| {
+                    let name = name.to_lowercase();
+                    keywords.iter().any(|keyword| name.contains(keyword))
+                        || fields_match(value, keywords, depth + 1)
+                }),
+                Value::Array(values) => values
+                    .iter()
+                    .any(|value| fields_match(value, keywords, depth + 1)),
+                _ => false,
+            }
+        }
+        let keywords: Vec<_> = goal
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| {
+                word.len() > 2 && !["the", "for", "and", "with", "please"].contains(word)
+            })
+            .collect();
+        keywords.is_empty()
+            || self.completed.iter().any(|(_, frame)| {
+                let endpoint = frame.url.as_str().to_lowercase();
+                keywords.iter().any(|keyword| endpoint.contains(keyword))
+                    || [&frame.request_body, &frame.response_body]
+                        .iter()
+                        .any(|body| {
+                            body.as_ref()
+                                .is_some_and(|body| fields_match(body, &keywords, 0))
+                        })
+            })
+    }
+    async fn observe(
+        &mut self,
+        cdp: &CdpClient,
+        session: &str,
+        target: &Url,
+        events: &mut tokio::sync::mpsc::Receiver<CdpEvent>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), ReifyError> {
+        let mut bodies = FuturesUnordered::new();
+        let mut loaded = deadline.is_some();
+        let mut last_activity = tokio::time::Instant::now();
+        loop {
+            let quiet = last_activity + Duration::from_millis(750);
+            tokio::select! {
+                biased;
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => break,
+                Some((sequence, frame, response)) = bodies.next(), if !bodies.is_empty() => {
+                    let mut frame: CapturedFrame = frame;
+                    if let Ok(response) = response { frame.response_body = decode_body(&response); }
+                    // Bodies can be unavailable after eviction or for 204 responses;
+                    // retain the completed request and response metadata in that case.
+                    self.completed.push((sequence, frame));
+                    last_activity = tokio::time::Instant::now();
+                }
+                event = events.recv() => {
+                    let mut event = event.ok_or_else(|| failure("CDP events", "socket closed or event queue overflowed"))?;
+                    if event.session_id.as_deref() != Some(session) { continue; }
+                    if event.method == "Page.loadEventFired" { loaded = true; last_activity = tokio::time::Instant::now(); }
+                    let was_pending=!self.pending.is_empty();
+                    if let Some((sequence, frame)) = self.event(&mut event, target) {
+                        if bodies.len() >= 16 { return Err(failure("capture", "response concurrency limit exceeded")); }
+                        bodies.push(async move {
+                            let response = cdp.command("Network.getResponseBody", json!({"requestId":sequence.1}), Some(session)).await;
+                            (sequence.0, frame, response)
+                        });
+                    }
+                    if was_pending || !self.pending.is_empty() { last_activity = tokio::time::Instant::now(); }
+                }
+                _ = tokio::time::sleep_until(quiet), if deadline.is_none() && loaded && self.pending.is_empty() && bodies.is_empty() => break,
+            }
+        }
+        Ok(())
+    }
     fn event(
         &mut self,
         event: &mut CdpEvent,
@@ -283,7 +369,13 @@ impl Capture {
                 };
                 let r = &mut p["request"];
                 let url = Url::parse(r["url"].as_str()?).ok()?;
-                if !filter::is_first_party(target, &url) || filter::is_noise(&url, "") {
+                if !(filter::is_first_party(target, &url)
+                    || self
+                        .discovery_scope
+                        .as_ref()
+                        .is_some_and(|scope| filter::is_first_party(scope, &url)))
+                    || filter::is_noise(&url, "")
+                {
                     return None;
                 }
                 let request_headers = headers(&mut r["headers"]);
@@ -429,6 +521,61 @@ mod tests {
         assert!(decode_body(&json!({"body":"%%%","base64Encoded":true})).is_none());
         assert!(decode_body(&json!({"body":"not json"})).is_none());
         assert!(decode_body(&json!({"body":" ".repeat(MAX_BODY+1)})).is_none());
+    }
+
+    #[test]
+    fn goal_matching_checks_endpoint_and_json_field_names() {
+        let target = Url::parse("https://example.com").unwrap();
+        let mut capture = Capture::default();
+        capture.event(
+            &mut event(
+                "Network.requestWillBeSent",
+                json!({
+                    "requestId":"r", "type":"Fetch", "request":{
+                        "url":"https://example.com/api/items", "method":"GET", "headers":{}
+                    }
+                }),
+            ),
+            &target,
+        );
+        let (sequence, mut frame) = capture.pending.remove("r").unwrap();
+        frame.response_body = Some(json!({"data":[{"stories":[], "title":"catalog"}]}));
+        capture.completed.push((sequence, frame));
+        assert!(capture.matches_goal("items"));
+        assert!(capture.matches_goal("stories"));
+        assert!(!capture.matches_goal("catalog"));
+    }
+
+    #[test]
+    fn capture_accepts_only_original_or_declared_search_hosts() {
+        let target = Url::parse("https://example.com").unwrap();
+        let mut capture = Capture::default();
+        let request = |url: &str| {
+            event(
+                "Network.requestWillBeSent",
+                json!({
+                    "requestId":"r", "type":"Fetch", "request":{
+                        "url":url, "method":"GET", "headers":{}
+                    }
+                }),
+            )
+        };
+        capture.event(
+            &mut request("https://search.example.org/api/search"),
+            &target,
+        );
+        assert!(capture.pending.is_empty());
+        capture.discovery_scope = Some(Url::parse("https://search.example.org").unwrap());
+        capture.event(
+            &mut request("https://search.example.org/api/search"),
+            &target,
+        );
+        assert_eq!(capture.pending.len(), 1);
+        capture.event(
+            &mut request("https://search.example.org.evil.com/api/search"),
+            &target,
+        );
+        assert!(capture.pending.is_empty());
     }
 }
 

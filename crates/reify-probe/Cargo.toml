@@ -25,6 +25,7 @@ base64.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+reify-synth = { path = "../reify-synth" }
 http.workspace = true
 bytes.workspace = true
 http-body = "1.0"

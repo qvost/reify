@@ -1,5 +1,6 @@
 //! Bounded SSR state extraction, with isolated browser traffic capture as fallback.
 #![warn(missing_docs)]
+pub mod action;
 pub mod auth;
 pub mod cdp;
 pub mod engine;
