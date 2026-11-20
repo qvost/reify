@@ -1,5 +1,6 @@
 //! Command dispatch, cancellation, and cache-aware compilation.
 pub mod gateway;
+pub mod install;
 pub mod probe;
 use crate::{Cli, CliError, Command, failure, ui};
 use reify_core::domain::Target;
@@ -48,7 +49,8 @@ impl AppBuilder for CliBuilder {
             let frames = captured.frames.len();
             let synth = self.synth.clone();
             let (app, synthesis_ms) = tokio::task::spawn_blocking(move || {
-                let output = synth.synthesize(&target, &captured.frames, &captured.auth)?;
+                let scope = Target::from_url(captured.final_url.clone(), target.goal.clone())?;
+                let output = synth.synthesize(&scope, &captured.frames, &captured.auth)?;
                 Ok::<_, reify_core::ReifyError>((
                     CachedApp {
                         target,
@@ -117,6 +119,7 @@ where
         slots: tokio::sync::Semaphore::new(2),
     }));
     match cli.command {
+        Some(Command::Install(options)) => install::run(&options, color),
         Some(Command::Serve { host, port }) => {
             let listener = TcpListener::bind((host.as_str(), port))
                 .await
@@ -129,12 +132,20 @@ where
             )
             .await
         }
-        Some(Command::Probe { url }) => {
+        Some(Command::Probe { url, goal }) => {
             let _progress = ui::Progress::start("Capturing API traffic", color);
-            let target = Target::from_url(url, None)?;
+            let target = Target::from_url(url, Some(goal.join(" ")))?;
             let output = tokio::select! {output=probe.probe(&target,timeout)=>output?,_=wait_for_shutdown(stop)=>return Err(CliError::Interrupted)};
             drop(_progress);
-            ui::write_serializable(&probe::report(&output))?;
+            let scope = Target::from_url(output.final_url.clone(), target.goal)?;
+            let tools = SynthEngine::new()
+                .synthesize(&scope, &output.frames, &output.auth)
+                .map(|compiled| compiled.tools)
+                .unwrap_or_else(|_| {
+                    tracing::debug!("probe capture did not support a relevant tool schema");
+                    Vec::new()
+                });
+            ui::write_serializable(&probe::report_with_tools(&output, &tools))?;
             Ok(())
         }
         Some(Command::Call {

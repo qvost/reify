@@ -1454,6 +1454,7 @@ dependencies = [
  "libc",
  "memchr",
  "reify-core",
+ "reify-synth",
  "reqwest",
  "serde",
  "serde_json",

@@ -24,3 +24,21 @@ pub fn report(output: &ProbeOutput) -> impl serde::Serialize + '_ {
         duration_ms: output.duration_ms,
     }
 }
+
+/// Stream the captured traffic and the tool schemas it supports. Credentials stay
+/// in the private execution context rather than becoming a diagnostic field.
+pub fn report_with_tools<'a>(
+    output: &'a ProbeOutput,
+    tools: &'a [reify_core::domain::CompiledTool],
+) -> impl serde::Serialize + 'a {
+    #[derive(serde::Serialize)]
+    struct Report<'a, T> {
+        #[serde(flatten)]
+        capture: T,
+        tools: Vec<&'a reify_core::mcp::ToolDefinition>,
+    }
+    Report {
+        capture: report(output),
+        tools: tools.iter().map(|tool| &tool.definition).collect(),
+    }
+}

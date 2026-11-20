@@ -14,6 +14,67 @@ pub enum Color {
     /// Never emit ANSI styles.
     Never,
 }
+/// Agent configuration layouts supported by the installer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum InstallAgent {
+    /// Cursor editor.
+    Cursor,
+    /// Claude Code.
+    Claude,
+    /// Windsurf editor.
+    Windsurf,
+    /// OpenCode v2.
+    Opencode,
+    /// Discover installed agents automatically.
+    All,
+}
+/// Configure an agent to connect to the Reify gateway.
+#[derive(Debug, clap::Args)]
+pub struct InstallArgs {
+    /// Agent to configure; all discovers installed environments.
+    #[arg(long, value_enum, default_value = "all")]
+    pub agent: InstallAgent,
+    /// Gateway bind port.
+    #[arg(long, default_value_t = 8080, value_parser = clap::value_parser!(u16).range(1..))]
+    pub port: u16,
+    /// Gateway bind host.
+    #[arg(long, default_value = "127.0.0.1", value_parser = parse_bind_host)]
+    pub host: String,
+    /// Install in the user home directory; use --global=false for the workspace.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set,
+        num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub global: bool,
+    /// Install in the current workspace (alias for --global=false).
+    #[arg(long, conflicts_with = "global")]
+    pub local: bool,
+    /// Display planned edits without writing files or creating directories.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Remove only the reify server entry.
+    #[arg(long)]
+    pub uninstall: bool,
+}
+
+fn parse_bind_host(value: &str) -> Result<String, String> {
+    if let Ok(ip) = value
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        return Ok(ip.to_string());
+    }
+    let host =
+        url::Host::parse(value).map_err(|_| "expected a hostname or IP address".to_owned())?;
+    let host = host.to_string();
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+    {
+        return Err("expected a hostname or IP address".into());
+    }
+    Ok(host)
+}
 /// Parsed `reify` invocation. A URL without a subcommand selects compile/mount mode.
 #[derive(Debug, Parser)]
 #[command(
@@ -45,6 +106,8 @@ pub struct Cli {
 /// Supported developer commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Connect installed AI agents to the Reify MCP gateway.
+    Install(InstallArgs),
     /// Start the long-running stateless MCP gateway.
     Serve {
         /// Bind hostname or IP address.
@@ -54,11 +117,14 @@ pub enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
-    /// Capture API traffic and print formatted JSON; no server is started.
+    /// Print captured API traffic and synthesized tool schemas as JSON.
     Probe {
         /// Target HTTP(S) URL.
         #[arg(value_parser=parse_url)]
         url: Url,
+        /// Task goal used to discover interactive search endpoints.
+        #[arg(value_name = "GOAL", num_args = 0..)]
+        goal: Vec<String>,
     },
     /// Resolve and execute a synthesized tool, printing its MCP result as JSON.
     Call {
@@ -135,7 +201,7 @@ impl Cli {
             if argument.starts_with('-')
                 || matches!(
                     argument.as_ref(),
-                    "serve" | "probe" | "call" | "bridge" | "help"
+                    "serve" | "probe" | "call" | "bridge" | "install" | "help"
                 )
             {
                 break;

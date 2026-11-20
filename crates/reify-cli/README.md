@@ -8,6 +8,43 @@ cargo install --path crates/reify-cli
 reify --help
 ```
 
+## Connect an AI agent
+
+```sh
+reify install --dry-run
+reify install
+reify serve --port 8080
+```
+
+`install` discovers Cursor, Claude Code, Windsurf, and OpenCode from existing
+configuration files, agent directories, or executables on PATH. It configures
+detected agents globally by default. Select `--agent cursor|claude|windsurf|opencode`
+to create a configuration even when discovery finds no installation.
+
+| Agent | Global configuration | Workspace configuration (`--local`) |
+| --- | --- | --- |
+| Cursor | `~/.cursor/mcp.json`, or an existing XDG `Cursor` configuration directory | `.cursor/mcp.json` |
+| Claude Code | `~/.claude.json`, or existing `~/.claude/config.json` | `.mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `.codeium/windsurf/mcp_config.json` |
+| OpenCode v2 | `$XDG_CONFIG_HOME/opencode/opencode.json` (defaults to `~/.config/opencode/opencode.json`) | `opencode.json` |
+
+```sh
+reify install --agent claude --port 8081
+reify install --agent cursor --local
+reify install --agent opencode --global=false --dry-run
+reify install --uninstall
+```
+
+The command updates only the `reify` server entry, preserves other servers and
+settings, and writes changed JSON through a temporary sibling file followed by
+an atomic rename. Existing permissions and config-file symlinks are preserved.
+All target configs are parsed before any edit; malformed JSON or an incompatible
+server-container type stops the operation. Repeated installs skip unchanged
+files. Uninstall preserves empty server maps and creates no missing files.
+`--dry-run` prints the planned Reify entry without writing files or directories.
+The gateway runs separately with `reify serve`; installation prints its startup
+command and endpoint.
+
 ## Compile and mount
 
 ```sh

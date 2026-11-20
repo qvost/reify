@@ -1,7 +1,57 @@
 use reify_cli::{Cli, Command, args::parse_arguments, ui};
 use serde_json::json;
+
+#[test]
+fn diagnostic_report_includes_synthesized_query_schema_without_credential_bundle() {
+    let target = reify_core::domain::Target::new("https://example.com", None).unwrap();
+    let frame = serde_json::from_value(json!({
+        "id":"00000000-0000-4000-8000-000000000001",
+        "url":"https://example.com/api/search?q=test", "method":"GET",
+        "request_headers":{}, "request_body":null, "status_code":200,
+        "response_headers":{"content-type":"application/json"},
+        "response_body":{"stories":[{"title":"Fixture"}]},
+        "timestamp":"2026-01-01T00:00:00Z", "resource_type":"Fetch"
+    }))
+    .unwrap();
+    let mut auth = reify_core::domain::AuthContext::default();
+    auth.cookies
+        .insert("session".into(), "private-cookie-value".into());
+    let output = reify_probe::ProbeOutput {
+        frames: vec![frame],
+        auth,
+        final_url: target.url.clone(),
+        page_title: Some("Fixture".into()),
+        duration_ms: 1,
+    };
+    let compiled = reify_synth::SynthEngine::new()
+        .synthesize(&target, &output.frames, &output.auth)
+        .unwrap();
+    let report = serde_json::to_value(reify_cli::commands::probe::report_with_tools(
+        &output,
+        &compiled.tools,
+    ))
+    .unwrap();
+    assert_eq!(report["frames"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report["tools"][0]["inputSchema"]["properties"]["q"]["type"],
+        "string"
+    );
+    assert!(report.get("auth").is_none());
+    assert!(!report.to_string().contains("private-cookie-value"));
+}
+
 #[test]
 fn test_cli_argument_parsing() {
+    let parsed = Cli::parse_checked_from([
+        "reify",
+        "probe",
+        "https://news.ycombinator.com",
+        "search stories",
+    ])
+    .unwrap();
+    assert!(
+        matches!(parsed.command, Some(Command::Probe { goal, .. }) if goal == ["search stories"])
+    );
     let parsed =
         Cli::parse_checked_from(["reify", "https://Example.com/", "search", "flights"]).unwrap();
     assert_eq!(parsed.url.unwrap().as_str(), "https://example.com/");

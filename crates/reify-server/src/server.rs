@@ -57,7 +57,8 @@ impl AppBuilder for BrowserAppBuilder {
             let output = self.probe.probe(&target, Duration::from_secs(30)).await?;
             let synth = self.synth.clone();
             tokio::task::spawn_blocking(move || {
-                let compiled = synth.synthesize(&target, &output.frames, &output.auth)?;
+                let scope = Target::from_url(output.final_url.clone(), target.goal.clone())?;
+                let compiled = synth.synthesize(&scope, &output.frames, &output.auth)?;
                 Ok(CachedApp {
                     target,
                     tools: compiled.tools,
