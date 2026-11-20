@@ -203,8 +203,8 @@ fn validate(request: &ForwardRequest) -> Result<(), ReifyError> {
     }
     Ok(())
 }
-struct BridgeState {
-    store: SessionStore,
+pub(super) struct BridgeState {
+    pub(super) store: SessionStore,
     transport: Arc<dyn ForwardTransport>,
     token: String,
     slots: Semaphore,
@@ -259,7 +259,9 @@ impl BridgeServer {
         Router::new()
             .route("/health", get(health))
             .route("/forward", post(forward))
+            .merge(crate::session::routes())
             .layer(DefaultBodyLimit::max(1024 * 1024))
+            .layer(axum::middleware::from_fn(crate::session::cors))
             .with_state(self.state.clone())
     }
     /// Serve a configurable loopback address until canceled or the listener fails.
@@ -305,11 +307,11 @@ impl BridgeServer {
             .map_err(|_| error("bridge HTTP server failed"))
     }
 }
-fn api_error(status: StatusCode, message: &str) -> Response {
+pub(super) fn api_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error":message}))).into_response()
 }
 async fn health(headers: HeaderMap) -> Response {
-    if headers.contains_key("origin") {
+    if headers.contains_key("origin") && crate::session::extension_origin(&headers).is_none() {
         return api_error(StatusCode::FORBIDDEN, "browser origins are not allowed");
     }
     Json(json!({"status":"ok","protocol_version":PROTOCOL_VERSION})).into_response()
@@ -322,15 +324,7 @@ async fn forward(
     if headers.contains_key("origin") {
         return api_error(StatusCode::FORBIDDEN, "browser origins are not allowed");
     }
-    if headers.get_all("authorization").iter().count() != 1
-        || headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|value| value.split_once(' '))
-            .is_none_or(|(scheme, token)| {
-                !scheme.eq_ignore_ascii_case("Bearer") || token != state.token
-            })
-    {
+    if !authorized(&state, &headers) {
         return api_error(StatusCode::UNAUTHORIZED, "bridge bearer token required");
     }
     if validate(&request).is_err() {
@@ -365,4 +359,14 @@ async fn forward(
             "bridge upstream forwarding failed or timed out",
         ),
     }
+}
+pub(super) fn authorized(state: &BridgeState, headers: &HeaderMap) -> bool {
+    headers.get_all("authorization").iter().count() == 1
+        && !headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|value| value.split_once(' '))
+            .is_none_or(|(scheme, token)| {
+                !scheme.eq_ignore_ascii_case("Bearer") || token != state.token
+            })
 }

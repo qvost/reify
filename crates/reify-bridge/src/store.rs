@@ -3,6 +3,14 @@ use reify_core::{ReifyError, domain::AuthContext};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use url::Host;
+/// Public session metadata; credential values are never serialized here.
+#[derive(serde::Serialize)]
+pub struct SessionInfo {
+    /// Exact browser origin authorized by the user.
+    pub origin: String,
+    /// Time at which the shared session expires.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 /// Normalize a bare hostname/IPv4/bracketed IPv6 key, including IDNA.
 pub fn normalize_domain(domain: &str) -> Result<String, ReifyError> {
     if domain.is_empty()
@@ -35,6 +43,9 @@ impl SessionStore {
     /// Validate and install a bundle. Host aliases/subdomains do not inherit it.
     pub async fn insert(&self, domain: &str, auth: AuthContext) -> Result<(), ReifyError> {
         let domain = normalize_domain(domain)?;
+        self.insert_key(domain, auth).await
+    }
+    async fn insert_key(&self, key: String, auth: AuthContext) -> Result<(), ReifyError> {
         let headers = auth
             .to_headers()?
             .iter()
@@ -52,7 +63,7 @@ impl SessionStore {
             })
             .collect::<Result<_, ReifyError>>()?;
         let previous = self.entries.write().await.insert(
-            domain,
+            key,
             Arc::new(Session {
                 auth,
                 headers: Arc::new(headers),
@@ -60,6 +71,52 @@ impl SessionStore {
         );
         drop(previous);
         Ok(())
+    }
+    /// Store credentials for one exact HTTP(S) origin, including scheme and port.
+    pub async fn insert_origin(
+        &self,
+        origin: &url::Url,
+        auth: AuthContext,
+    ) -> Result<(), ReifyError> {
+        self.insert_key(origin.origin().ascii_serialization(), auth)
+            .await
+    }
+    /// Read a live browser-origin bundle without falling back to legacy host keys.
+    pub async fn auth_for_origin(&self, origin: &url::Url) -> Option<AuthContext> {
+        let key = origin.origin().ascii_serialization();
+        let entry = self.entries.read().await.get(&key).cloned()?;
+        entry
+            .auth
+            .expires_at
+            .is_none_or(|expiry| expiry > chrono::Utc::now())
+            .then(|| entry.auth.clone())
+    }
+    /// List live browser sessions, removing expired credentials from memory.
+    pub async fn origins(&self) -> Vec<SessionInfo> {
+        let mut entries = self.entries.write().await;
+        entries.retain(|_, session| {
+            session
+                .auth
+                .expires_at
+                .is_none_or(|expiry| expiry > chrono::Utc::now())
+        });
+        let mut origins: Vec<_> = entries
+            .iter()
+            .filter(|(key, _)| key.contains("://"))
+            .map(|(origin, session)| SessionInfo {
+                origin: origin.clone(),
+                expires_at: session.auth.expires_at,
+            })
+            .collect();
+        origins.sort_by(|a, b| a.origin.cmp(&b.origin));
+        origins
+    }
+    /// Revoke only the explicitly shared browser origin.
+    pub async fn remove_origin(&self, origin: &url::Url) {
+        self.entries
+            .write()
+            .await
+            .remove(&origin.origin().ascii_serialization());
     }
     /// Read a nonexpired bundle. Invalid names and expired bundles return None.
     pub async fn get(&self, domain: &str) -> Option<AuthContext> {
@@ -75,7 +132,11 @@ impl SessionStore {
     /// and avoid cloning/re-encoding the original credential maps on each forward.
     pub(crate) async fn headers_for(&self, url: &url::Url) -> Option<Arc<HashMap<String, String>>> {
         let host = url.host_str()?.trim_end_matches('.');
-        let entry = self.entries.read().await.get(host).cloned()?;
+        let entries = self.entries.read().await;
+        let entry = entries
+            .get(&url.origin().ascii_serialization())
+            .or_else(|| entries.get(host))
+            .cloned()?;
         entry
             .auth
             .expires_at

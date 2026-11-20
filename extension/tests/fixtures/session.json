@@ -1,0 +1,8 @@
+{
+  "origin": "https://github.com",
+  "headers": {
+    "cookie": "user_session=fixture-session; __Host-user=fixture-user",
+    "user-agent": "Mozilla/5.0 ReifyExtensionFixture"
+  },
+  "ttl_seconds": 3600
+}

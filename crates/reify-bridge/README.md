@@ -16,8 +16,9 @@ GET `/health` returns public status and protocol version, without credentials:
 {"status":"ok","protocol_version":"2026-07-28"}
 ```
 
-POST `/forward` requires `Authorization: Bearer <local bridge token>`. A present
-browser Origin is denied on all routes; no permissive CORS layer is installed.
+POST `/forward` requires `Authorization: Bearer <local bridge token>`. Browser
+origins are rejected on forwarding and native credential reads. Chrome extension
+origins can access only health and authenticated session management through CORS.
 The local bridge authorization header is not forwarded to the upstream target.
 
 ```sh
@@ -74,16 +75,44 @@ octets are rejected. Explicit headers in a forward request override configured
 headers by case-insensitive name. The domain store is independent of the MCP
 server's compiled-app cache and contains only developer-supplied state.
 
-This component does not read local browser profiles, extract login sessions, or
-promise a WAF bypass. Requests originate through the local network's normal HTTP
-client; a target still applies its own authorization and security policies.
+## Chrome companion
+
+The [Shaligram Reify extension](../../extension/README.md) shares cookies from the
+current tab only when the user clicks **Bridge Current Tab**. It pairs with the
+existing bridge bearer token; session headers stay in bridge memory.
+
+- `POST /session` accepts `{ "origin": "https://github.com", "headers": {
+  "cookie": "session=…", "user-agent": "Mozilla/5.0…" }, "ttl_seconds": 3600 }`.
+- `GET /sessions` returns live origin/expiration metadata without credentials.
+- `DELETE /session` accepts `{ "origin": "https://github.com" }` and removes only
+  that origin. Repeating it succeeds.
+- `GET /session/auth?origin=https%3A%2F%2Fgithub.com` returns the current
+  `AuthContext` for native clients. Browser and extension origins are rejected.
+
+All session endpoints require the bridge bearer token. Only HTTP(S) origins
+without paths or credentials are accepted. Sessions expire after 1–3600 seconds,
+match scheme/host/port exactly, and never implicitly authorize another host.
+`SessionStore::insert_origin`, `auth_for_origin`, `origins`, and `remove_origin`
+expose the same storage operations for embedders. The older bare-host API remains
+available for developer-configured forwarding bundles.
+
+With `REIFY_BRIDGE_TOKEN` set to the same token as the bridge, probing seeds the
+shared cookies into isolated Chromium before navigating. The MCP proxy reads
+current credentials for the rendered tool URL on every invocation, so revoking
+a session prevents subsequent calls from reusing its compiled credentials.
+An unavailable bridge fails credential lookup instead of reusing stale state.
+
+This component does not read local browser profiles or promise a WAF bypass.
+Requests originate through the local network's normal HTTP client; a target
+still applies its own authorization and security policies.
 
 ## Tests
 
-Five tests exercise health/version reporting, typed forward/header/status/body
+Tests exercise health/version reporting, typed forward/header/status/body
 preservation, repeated Set-Cookie values, exact-domain store roundtrips and expiry,
-origin/auth/header rejection, loopback binding restrictions, and explicit null
-body handling. The forwarding fixture dispatches a real in-process Axum request
+origin/auth/header rejection, loopback binding restrictions, explicit null
+body handling, extension payloads, exact-origin matching, expiry, and revocation.
+The forwarding fixture dispatches a real in-process Axum request
 through an injectable transport so it works without opening a socket. Production
 `HttpTransport` uses Reqwest sockets and requires normal network permissions.
 

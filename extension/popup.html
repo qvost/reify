@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shaligram Reify</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="popup.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <img src="icons/emblem.svg" width="34" height="34" alt="">
+    <span class="wordmark">SHALIGRAM REIFY</span>
+    <span class="edition">0.1</span>
+  </header>
+  <main>
+    <div id="bridge-status" class="status" role="status"><span class="status-dot" aria-hidden="true"></span><span id="status-label">Checking bridge…</span></div>
+    <section class="current-tab" aria-labelledby="domain">
+      <p class="caption">Current tab</p>
+      <h1 id="domain">Connecting…</h1>
+      <p class="intro">Share this tab’s sign-in with your local Reify gateway.</p>
+      <button id="bridge-tab" class="primary" type="button" disabled>Bridge Current Tab</button>
+      <p class="fineprint">Shared for up to 1 hour. Revoke any time.</p>
+    </section>
+    <details id="connection" class="connection">
+      <summary>Bridge connection</summary>
+      <form id="pair-form">
+        <label for="token">Bridge token</label>
+        <div class="token-row"><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Your REIFY_BRIDGE_TOKEN" required minlength="16"><button id="connect" class="secondary" type="submit">Connect</button></div>
+        <p class="fineprint">Use the token you set when starting <code>reify bridge</code>. Kept for this browser session.</p>
+      </form>
+    </details>
+    <p id="feedback" class="feedback" aria-live="polite"></p>
+    <section class="sessions" aria-labelledby="sessions-heading">
+      <div class="section-heading"><h2 id="sessions-heading">Shared sessions</h2><span id="session-count">0</span></div>
+      <p id="sessions-note" class="fineprint" hidden>Reconnect to verify or revoke these sessions.</p>
+      <ul id="session-list"></ul>
+      <p id="empty-state" class="empty-state">No sessions shared yet.</p>
+    </section>
+  </main>
+  <footer><span>Shaligram Labs</span><span>Only shared when you click.</span></footer>
+</body>
+</html>

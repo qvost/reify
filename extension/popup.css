@@ -1,0 +1,66 @@
+:root {
+  color-scheme: light;
+  --bone: #f0eee8;
+  --carbon: #141414;
+  --muted: #66635d;
+  --line: #cfccc4;
+  --green: #31563f;
+  --error: #8a352d;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: var(--carbon);
+  background: var(--bone);
+  font-synthesis: none;
+}
+* { box-sizing: border-box; }
+body { width: 376px; margin: 0; font-size: 13px; line-height: 1.5; }
+.masthead { display: flex; align-items: center; gap: 10px; padding: 23px 24px 19px; border-bottom: 1px solid var(--line); }
+.wordmark { font-size: 12px; letter-spacing: .13em; font-weight: 600; }
+.edition { margin-left: auto; font-size: 11px; color: var(--muted); }
+main { padding: 20px 24px 0; }
+.status { display: flex; align-items: center; gap: 7px; width: fit-content; max-width: 100%; padding: 5px 10px; border: 1px solid var(--line); border-radius: 30px; color: var(--muted); font-size: 11px; }
+.status-dot { flex: 0 0 6px; height: 6px; border: 1px solid currentColor; border-radius: 50%; }
+.status.online { color: var(--green); }
+.status.online .status-dot { background: currentColor; }
+.current-tab { padding: 25px 0 20px; }
+p { margin: 0; }
+.caption { color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+h1 { margin: 0; font-size: 31px; line-height: 1.15; font-weight: 500; letter-spacing: -.045em; overflow-wrap: anywhere; }
+.intro { max-width: 265px; margin-top: 12px; color: var(--muted); line-height: 1.65; }
+button, input { font: inherit; }
+button { cursor: pointer; transition: opacity 120ms ease, background 120ms ease; }
+button:disabled { cursor: default; opacity: .4; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
+.primary { width: 100%; margin-top: 22px; padding: 13px 20px; border: 1px solid var(--carbon); border-radius: 40px; background: var(--carbon); color: var(--bone); font-size: 13px; font-weight: 500; }
+.primary:not(:disabled):hover { background: #33312e; }
+.fineprint { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.current-tab > .fineprint { margin-top: 10px; text-align: center; }
+.connection { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+summary { padding: 12px 0; cursor: pointer; font-size: 12px; color: var(--muted); }
+.connection[open] summary { color: var(--carbon); }
+#pair-form { padding: 4px 0 15px; }
+label { display: block; font-size: 12px; margin-bottom: 7px; }
+.token-row { display: flex; gap: 8px; margin-bottom: 9px; }
+input { width: 0; min-width: 0; flex: 1; padding: 9px 11px; background: transparent; border: 1px solid var(--line); border-radius: 5px; color: var(--carbon); font-size: 12px; }
+input::placeholder { color: #78756f; font-size: 11px; }
+.secondary { padding: 8px 14px; border: 1px solid var(--carbon); border-radius: 30px; color: var(--carbon); background: transparent; font-size: 12px; }
+.secondary:hover { background: #e5e2da; }
+code { font-size: 10px; }
+.feedback { min-height: 0; padding-top: 0; font-size: 12px; color: var(--green); }
+.feedback:not(:empty) { padding-top: 13px; }
+.feedback.error { color: var(--error); }
+.sessions { padding: 20px 0 24px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+h2 { margin: 0; font-size: 13px; font-weight: 500; }
+#session-count { color: var(--muted); font-size: 11px; }
+ul { list-style: none; padding: 0; margin: 0; }
+.session { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding: 13px 0; }
+.session:last-child { border-bottom: 0; }
+.session-info { flex: 1; min-width: 0; }
+.session-origin { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.session-expiry { display: block; margin-top: 2px; font-size: 10px; color: var(--muted); }
+.revoke { flex: 0 0 auto; padding: 4px 0 4px 6px; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 3px; color: var(--muted); font-size: 11px; }
+.revoke:not(:disabled):hover { color: var(--error); }
+.empty-state { color: var(--muted); padding-top: 12px; font-size: 12px; }
+footer { display: flex; justify-content: space-between; gap: 10px; padding: 13px 24px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { button { transition: none; } }

@@ -22,6 +22,7 @@ pub struct ProxyResponse {
 #[derive(Clone)]
 pub struct UpstreamProxy {
     client: reqwest::Client,
+    bridge: Option<reify_bridge::BridgeClient>,
 }
 impl UpstreamProxy {
     /// Configure a pooled client; no automatic retries of mutation methods.
@@ -33,7 +34,10 @@ impl UpstreamProxy {
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|_| failure("cannot construct upstream client"))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            bridge: reify_bridge::BridgeClient::from_env()?,
+        })
     }
     /// Render and invoke a synthesized tool, preserving JSON and HTTP failures.
     pub async fn execute(
@@ -56,6 +60,13 @@ impl UpstreamProxy {
         headers: &http::HeaderMap,
     ) -> Result<ProxyResponse, ReifyError> {
         let rendered = prepared.render(arguments)?;
+        let current = match &self.bridge {
+            Some(bridge) => Some(bridge.auth_for(&rendered.url).await?.unwrap_or_default()),
+            None => None,
+        };
+        let current_headers = current.as_ref().map(AuthContext::to_headers).transpose()?;
+        let auth = current.as_ref().unwrap_or(auth);
+        let headers = current_headers.as_ref().unwrap_or(headers);
         if auth.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
             return Err(failure(
                 "upstream credentials have expired; reify the target again",

@@ -1,3 +1,5 @@
+#[path = "../../../test-support/environment.rs"]
+mod environment;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -254,12 +256,12 @@ async fn upstream(
         Json(json!({"items":[1,2]})),
     )
 }
-async fn upstream_server() -> (String, Upstream, tokio::task::JoinHandle<()>) {
+async fn upstream_server() -> Option<(String, Upstream, tokio::task::JoinHandle<()>)> {
     let state = Upstream {
         status: Arc::new(AtomicUsize::new(200)),
         hits: Arc::new(AtomicUsize::new(0)),
     };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = environment::loopback_listener().await?;
     let url = format!("http://{}", listener.local_addr().unwrap());
     let router = Router::new()
         .route("/api/items/{item_id}", post(upstream))
@@ -267,7 +269,7 @@ async fn upstream_server() -> (String, Upstream, tokio::task::JoinHandle<()>) {
     let job = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    (url, state, job)
+    Some((url, state, job))
 }
 fn invocation(token: &str, name: &str) -> Value {
     rpc(
@@ -277,7 +279,9 @@ fn invocation(token: &str, name: &str) -> Value {
 }
 #[tokio::test]
 async fn test_tool_execution_proxy() {
-    let (url, state, job) = upstream_server().await;
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
     let server = ReifyServer::with_builder(FixtureBuilder::new());
     let token = mount(&server, &url).await;
     let (status, headers, body) = call(&server, invocation(&token, "items_v1")).await;
@@ -292,7 +296,9 @@ async fn test_tool_execution_proxy() {
 }
 #[tokio::test]
 async fn test_drift_detection_and_self_healing() {
-    let (url, state, job) = upstream_server().await;
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
     state.status.store(401, Ordering::SeqCst);
     let builder = FixtureBuilder::new();
     let server = ReifyServer::with_builder(builder.clone());
@@ -442,7 +448,9 @@ async fn malformed_requests_origins_and_headers_are_rejected() {
 
 #[tokio::test]
 async fn schema_404_rebuilds_without_retrying_the_upstream_mutation() {
-    let (url, state, job) = upstream_server().await;
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
     state.status.store(404, Ordering::SeqCst);
     let builder = FixtureBuilder::new();
     let server = ReifyServer::with_builder(builder.clone());
@@ -472,7 +480,9 @@ async fn schema_404_rebuilds_without_retrying_the_upstream_mutation() {
 }
 #[tokio::test]
 async fn invalid_arguments_and_missing_mount_never_touch_upstream() {
-    let (url, state, job) = upstream_server().await;
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
     let server = ReifyServer::with_builder(FixtureBuilder::new());
     let token = mount(&server, &url).await;
     let mut invalid = invocation(&token, "items_v1");

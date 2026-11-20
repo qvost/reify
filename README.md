@@ -91,6 +91,14 @@ reify probe https://example.com
 reify call https://news.ycombinator.com search_stories '{"query": "rust"}'
 ```
 
+### 5. Share an Authenticated Browser Session
+
+Load the [Shaligram Reify Chrome companion](extension/README.md) unpacked, run
+`reify bridge`, and connect the popup with your bridge token. **Bridge Current
+Tab** shares the tab's cookies for up to one hour. Run the gateway with the same
+`REIFY_BRIDGE_TOKEN` to use those sessions for probing and tool execution; revoke
+individual origins from the popup. The companion guide includes the full setup.
+
 ---
 
 ## Architecture
@@ -103,8 +111,8 @@ Reify is organized as a modular Rust workspace across 6 crates:
 | [`reify-probe`](crates/reify-probe) | Direct Chrome DevTools Protocol (CDP) client over WebSocket. Discards static assets (images, CSS, fonts, audio, video) and third-party trackers (Segment, Datadog, Google Analytics) at the network socket layer. Captures raw XHR, Fetch, and GraphQL frames with session cookies and CSRF tokens. |
 | [`reify-synth`](crates/reify-synth) | Algorithmic path clustering (`/items/{id}`), deterministic JSON Schema Draft 2020-12 type induction, optionality inference, and goal-directed tool pruning (strictly 3–5 tools to prevent context bloat). |
 | [`reify-server`](crates/reify-server) | High-performance `POST /mcp` handler with `Mcp-Method` / `Mcp-Name` routing, streaming support, and in-memory Blake3 store. Proxies tool calls upstream and passively monitors status codes (`401/403` auth drift, `404/400` schema drift) to trigger background re-synthesis before agents fail. |
-| [`reify-bridge`](crates/reify-bridge) | Local loopback development proxy (`127.0.0.1:9099`) for forwarding execution through residential TLS sessions and authenticated user cookies. |
-| [`reify-cli`](crates/reify-cli) | Production CLI providing `reify`, `reify serve`, `reify probe`, `reify call`, and `reify bridge`. |
+| [`reify-bridge`](crates/reify-bridge) | Loopback session bridge (`127.0.0.1:9099`) for explicit credentials and user-shared Chrome sessions. |
+| [`reify-cli`](crates/reify-cli) | Production CLI providing `reify`, `reify install`, `reify serve`, `reify probe`, `reify call`, and `reify bridge`. |
 
 ---
 

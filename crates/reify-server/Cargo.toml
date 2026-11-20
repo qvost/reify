@@ -7,6 +7,7 @@ description = "Stateless mounted MCP HTTP server with drift recovery"
 
 [dependencies]
 reify-core = { path = "../reify-core" }
+reify-bridge = { path = "../reify-bridge" }
 reify-probe = { path = "../reify-probe" }
 reify-synth = { path = "../reify-synth" }
 tokio = { workspace = true, features = ["full"] }

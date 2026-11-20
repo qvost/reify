@@ -134,9 +134,16 @@ explicit `AuthContext` bundles. For example:
 
 The token can also be supplied with `--token`; environment configuration avoids
 shell-history exposure. Neither startup nor `/health` prints the token or session
-credentials. No Chromium-profile database, browser login, keychain, or automatic
-cookie extraction is accessed. See the [bridge guide](../reify-bridge/README.md)
+credentials. The bridge binary never reads Chromium profiles, keychains, or
+browser state; the optional Chrome companion shares cookies only after a click.
+See the [bridge guide](../reify-bridge/README.md)
 for the typed `/forward` API, header precedence, and response envelope.
+
+For authenticated browser tabs, load the [Chrome companion](../../extension/README.md),
+connect it with the bridge token, and click **Bridge Current Tab**. Start
+`reify serve` in another terminal with the same `REIFY_BRIDGE_TOKEN`; the gateway
+then uses live shared credentials for probing and tool calls. Both processes are
+needed. The companion guide covers expiry and revocation.
 
 ## Terminal and lifecycle behavior
 
