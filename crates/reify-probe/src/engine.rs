@@ -44,6 +44,7 @@ pub struct ProbeOutput {
 pub struct ProbeEngine {
     binary: Option<PathBuf>,
     ssr: SsrProbe,
+    initial_auth: Option<AuthContext>,
 }
 impl ProbeEngine {
     /// Use automatic Chromium discovery.
@@ -55,6 +56,7 @@ impl ProbeEngine {
         Self {
             binary: Some(binary.into()),
             ssr: SsrProbe::default(),
+            initial_auth: None,
         }
     }
     /// Interactive goals use Chromium directly; other goals try SSR JSON first.
@@ -66,6 +68,24 @@ impl ProbeEngine {
         target: &Target,
         timeout: Duration,
     ) -> Result<ProbeOutput, ReifyError> {
+        if let Some(bridge) = reify_bridge::BridgeClient::from_env()? {
+            let started = Instant::now();
+            let initial_auth = tokio::time::timeout(timeout, bridge.auth_for(&target.url))
+                .await
+                .map_err(|_| failure("probe", "deadline exceeded"))??;
+            let configured = Self {
+                initial_auth,
+                ..self.clone()
+            };
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| failure("probe", "deadline exceeded"))?;
+            let mut output = configured
+                .probe_with_ssr(target, remaining, configured.ssr.probe(target))
+                .await?;
+            output.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            return Ok(output);
+        }
         self.probe_with_ssr(target, timeout, self.ssr.probe(target))
             .await
     }
@@ -82,14 +102,15 @@ impl ProbeEngine {
         let started = Instant::now();
         tokio::time::timeout(timeout, async {
             let budget = (timeout / 4).min(Duration::from_millis(500));
-            let mut output = if action::is_interactive(target.goal.as_deref()) {
-                self.run(target).await?
-            } else {
-                match tokio::time::timeout(budget, fast_path).await {
-                    Ok(Some(output)) => output,
-                    _ => self.run(target).await?,
-                }
-            };
+            let mut output =
+                if self.initial_auth.is_some() || action::is_interactive(target.goal.as_deref()) {
+                    self.run(target).await?
+                } else {
+                    match tokio::time::timeout(budget, fast_path).await {
+                        Ok(Some(output)) => output,
+                        _ => self.run(target).await?,
+                    }
+                };
             output.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
             Ok(output)
         })
@@ -133,6 +154,45 @@ impl ProbeEngine {
             cdp.command("Runtime.enable",json!({}),Some(session)),
             cdp.command("Network.enable",json!({"maxPostDataSize":MAX_BODY,"maxResourceBufferSize":MAX_BODY,"maxTotalBufferSize":16*MAX_BODY}),Some(session))
         )?;
+        if let Some(auth) = &self.initial_auth {
+            let headers = auth.to_headers()?;
+            if let Some(cookie) = headers.get("cookie").and_then(|value| value.to_str().ok()) {
+                let mut seen = std::collections::HashSet::new();
+                let cookies: Vec<_> = cookie
+                    .split(';')
+                    .filter_map(|pair| {
+                        let (name, value) = pair.trim().split_once('=')?;
+                        if !seen.insert(name) {
+                            return None;
+                        }
+                        let mut cookie = json!({"name":name,"value":value,
+                        "url":format!("{}/", target.url.origin().ascii_serialization()),
+                        "secure":target.url.scheme() == "https"});
+                        if let Some(expiry) = auth.expires_at {
+                            cookie["expires"] = json!(expiry.timestamp());
+                        }
+                        Some(cookie)
+                    })
+                    .collect();
+                cdp.command(
+                    "Network.setCookies",
+                    json!({"cookies":cookies}),
+                    Some(session),
+                )
+                .await?;
+            }
+            if let Some(agent) = headers
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok())
+            {
+                cdp.command(
+                    "Network.setUserAgentOverride",
+                    json!({"userAgent":agent}),
+                    Some(session),
+                )
+                .await?;
+            }
+        }
         let navigation = cdp
             .command(
                 "Page.navigate",

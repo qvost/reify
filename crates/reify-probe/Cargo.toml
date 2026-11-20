@@ -7,6 +7,7 @@ description = "Managed Chromium network capture over direct CDP"
 
 [dependencies]
 reify-core = { path = "../reify-core" }
+reify-bridge = { path = "../reify-bridge" }
 tokio = { workspace = true, features = ["full", "process"] }
 tokio-tungstenite = { version = "0.24", features = ["connect"] }
 futures-util = "0.3"

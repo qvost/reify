@@ -1,3 +1,5 @@
+#[path = "../../../test-support/environment.rs"]
+mod environment;
 use reify_core::domain::{CapturedFrame, ResourceType};
 use reify_probe::{
     auth::{AuthExtractor, BrowserCookie},
@@ -241,7 +243,9 @@ fn chromium_discovery_override_playwright_and_system() {
 async fn socket_correlates_out_of_order_replies_and_reports_disconnect() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let Some(listener) = environment::loopback_listener().await else {
+        return;
+    };
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -327,9 +331,13 @@ async fn zero_budget_returns_error() {
 #[tokio::test]
 async fn loopback_http_discovers_websocket() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let Some(http) = environment::loopback_listener().await else {
+        return;
+    };
     let port = http.local_addr().unwrap().port();
-    let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let Some(ws) = environment::loopback_listener().await else {
+        return;
+    };
     let ws_address = ws.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = http.accept().await.unwrap();
