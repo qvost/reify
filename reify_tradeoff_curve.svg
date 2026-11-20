@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675">
+  <defs>
+    <style>
+      .serif { font-family: "Georgia", "Times New Roman", serif; }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+    </style>
+    <linearGradient id="curveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#141414" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#8a877d" stop-opacity="0.3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background Warm Bone / Stone Paper -->
+  <rect width="1200" height="675" fill="#e5e3dc"/>
+
+  <!-- Outer Hairline Border -->
+  <rect x="24" y="24" width="1152" height="627" rx="16" fill="#f0eee8" stroke="#d5d2c7" stroke-width="1.5"/>
+
+  <!-- Header -->
+  <text x="64" y="72" class="mono" font-size="12" letter-spacing="2" fill="#75736b" font-weight="600">FIGURE 1 · SHALIGRAM LABS RESEARCH</text>
+  <text x="64" y="112" class="serif" font-size="32" font-weight="bold" fill="#141414">Task Success vs. Prompt Context Bloat</text>
+  <text x="64" y="140" class="sans" font-size="14" fill="#66635a">Empirical evaluation of visual browser agents vs. static MCP servers vs. Reify wire tool synthesis across 20 web services.</text>
+
+  <!-- Chart Area -->
+  <!-- Origin at (160, 540). Width=960, Height=340. Y ranges from 40% (540) to 100% (200). X ranges from 100 to 30,000 tokens -->
+  <g transform="translate(40, 20)">
+    <!-- Axes Grid Lines -->
+    <!-- 40% -->
+    <line x1="120" y1="520" x2="1060" y2="520" stroke="#dedbd2" stroke-width="1"/>
+    <text x="100" y="524" class="mono" font-size="11" fill="#8a877d" text-anchor="end">40%</text>
+
+    <!-- 60% -->
+    <line x1="120" y1="420" x2="1060" y2="420" stroke="#dedbd2" stroke-width="1"/>
+    <text x="100" y="424" class="mono" font-size="11" fill="#8a877d" text-anchor="end">60%</text>
+
+    <!-- 80% -->
+    <line x1="120" y1="320" x2="1060" y2="320" stroke="#dedbd2" stroke-width="1"/>
+    <text x="100" y="324" class="mono" font-size="11" fill="#8a877d" text-anchor="end">80%</text>
+
+    <!-- 100% -->
+    <line x1="120" y1="220" x2="1060" y2="220" stroke="#dedbd2" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="100" y="224" class="mono" font-size="11" fill="#8a877d" text-anchor="end">100%</text>
+
+    <!-- X Axis Labels -->
+    <text x="210" y="550" class="mono" font-size="11" fill="#8a877d" text-anchor="middle">100</text>
+    <text x="470" y="550" class="mono" font-size="11" fill="#8a877d" text-anchor="middle">1,000</text>
+    <text x="730" y="550" class="mono" font-size="11" fill="#8a877d" text-anchor="middle">10,000</text>
+    <text x="990" y="550" class="mono" font-size="11" fill="#8a877d" text-anchor="middle">30,000</text>
+    <text x="600" y="575" class="mono" font-size="11" fill="#75736b" text-anchor="middle" letter-spacing="1">PROMPT CONTEXT TOKENS (LOG SCALE)</text>
+
+    <!-- Y Axis Title -->
+    <text x="45" y="370" class="mono" font-size="11" fill="#75736b" text-anchor="middle" transform="rotate(-90 45 370)" letter-spacing="1">TASK SUCCESS RATE (%)</text>
+
+    <!-- Tradeoff Frontier Curve -->
+    <path d="M 280 258 C 450 270, 720 310, 960 415" fill="none" stroke="url(#curveGrad)" stroke-width="2" stroke-dasharray="6 6"/>
+
+    <!-- Point 1: Visual Browser-Use (24,100 tokens, 61.0%) -> X~960, Y~415 -->
+    <circle cx="960" cy="415" r="7" fill="#b94a48"/>
+    <rect x="740" y="440" width="280" height="60" rx="8" fill="#e8e5de" stroke="#d5d1c5" stroke-width="1"/>
+    <text x="755" y="462" class="sans" font-size="13" font-weight="bold" fill="#141414">Visual Browser-Use (VLM)</text>
+    <text x="755" y="482" class="mono" font-size="11" fill="#75736b">24,100 tokens · 61.0% · 22.4s/step</text>
+
+    <!-- Point 2: Static Full MCP (18,450 tokens, 89.0%) -> X~860, Y~275 -->
+    <circle cx="860" cy="275" r="6" fill="#c48a3f"/>
+    <rect x="730" y="215" width="260" height="52" rx="8" fill="#e8e5de" stroke="#d5d1c5" stroke-width="1"/>
+    <text x="745" y="235" class="sans" font-size="12" font-weight="bold" fill="#141414">Full Static MCP Server</text>
+    <text x="745" y="253" class="mono" font-size="11" fill="#75736b">18,450 tokens · 89.0% success</text>
+
+    <!-- Point 3: Unpruned Wire Server (8,200 tokens, 82.5%) -> X~680, Y~308 -->
+    <circle cx="680" cy="308" r="5" fill="#8a877d"/>
+    <text x="680" y="330" class="mono" font-size="10" fill="#75736b" text-anchor="middle">Unpruned Wire (8.2k tok)</text>
+
+    <!-- Point 4: REIFY (380 tokens, 92.5%) -> X~280, Y~258 -->
+    <!-- Glowing Ring / Focus -->
+    <circle cx="280" cy="258" r="16" fill="#141414" opacity="0.12"/>
+    <circle cx="280" cy="258" r="8" fill="#141414"/>
+    <circle cx="280" cy="258" r="4" fill="#ffffff"/>
+
+    <!-- Reify Highlight Card -->
+    <rect x="150" y="165" width="290" height="74" rx="10" fill="#141414"/>
+    <text x="170" y="195" class="sans" font-size="15" font-weight="bold" fill="#ffffff">★ REIFY (Shaligram Labs)</text>
+    <text x="170" y="215" class="mono" font-size="12" fill="#52e0a2" font-weight="bold">380 tokens · 92.5% Success</text>
+    <text x="170" y="230" class="mono" font-size="10" fill="#a09d94">4.1 µs dispatch · -98.4% token cut</text>
+
+    <!-- Efficiency Callout Pill on Top Right -->
+    <rect x="800" y="50" width="240" height="50" rx="25" fill="#141414"/>
+    <text x="920" y="73" class="sans" font-size="12" font-weight="bold" fill="#ffffff" text-anchor="middle">98.4% TOKEN REDUCTION</text>
+    <text x="920" y="90" class="mono" font-size="10" fill="#52e0a2" text-anchor="middle">160× FASTER EXECUTION</text>
+  </g>
+</svg>
