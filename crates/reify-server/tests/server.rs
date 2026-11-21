@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::State,
+    response::IntoResponse,
     routing::post,
 };
 use http::{Request, StatusCode};
@@ -106,9 +107,12 @@ fn rpc(method: &str, mut params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
 }
 fn request(value: &Value) -> Request<Body> {
+    request_with_accept(value, "application/json, text/event-stream")
+}
+fn request_with_accept(value: &Value, accept: &str) -> Request<Body> {
     let mut builder = Request::post("/mcp")
         .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
+        .header("Accept", accept)
         .header("MCP-Protocol-Version", PROTOCOL_VERSION)
         .header("Mcp-Method", value["method"].as_str().unwrap());
     if value["method"] == "tools/call" {
@@ -232,13 +236,14 @@ async fn simultaneous_cache_misses_compile_once() {
 struct Upstream {
     status: Arc<AtomicUsize>,
     hits: Arc<AtomicUsize>,
+    chunked: Arc<AtomicBool>,
 }
 async fn upstream(
     State(state): State<Upstream>,
     headers: http::HeaderMap,
     uri: http::Uri,
     Json(body): Json<Value>,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
     let parsed = url::Url::parse(&format!("http://fixture.test{uri}")).unwrap();
     let query: HashMap<_, _> = parsed
         .query_pairs()
@@ -251,15 +256,37 @@ async fn upstream(
     assert_eq!(headers["x-api-key"], "api-secret");
     assert_eq!(query["q"], "hello & world");
     assert_eq!(body, json!({"enabled":false}));
-    (
-        StatusCode::from_u16(state.status.load(Ordering::SeqCst) as u16).unwrap(),
-        Json(json!({"items":[1,2]})),
-    )
+    let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst) as u16).unwrap();
+    if state.chunked.load(Ordering::SeqCst) {
+        let chunks = [
+            axum::body::Bytes::from_static(b"{\"items\":"),
+            axum::body::Bytes::from_static(b"[1,2]}"),
+        ];
+        let body = Body::from_stream(futures_util::stream::unfold(
+            (chunks, 0usize),
+            |(chunks, index)| async move {
+                if index >= chunks.len() {
+                    return None;
+                }
+                if index > 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Some((
+                    Ok::<_, std::convert::Infallible>(chunks[index].clone()),
+                    (chunks, index + 1),
+                ))
+            },
+        ));
+        (status, body).into_response()
+    } else {
+        (status, Json(json!({"items":[1,2]}))).into_response()
+    }
 }
 async fn upstream_server() -> Option<(String, Upstream, tokio::task::JoinHandle<()>)> {
     let state = Upstream {
         status: Arc::new(AtomicUsize::new(200)),
         hits: Arc::new(AtomicUsize::new(0)),
+        chunked: Arc::new(AtomicBool::new(false)),
     };
     let listener = environment::loopback_listener().await?;
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -292,6 +319,110 @@ async fn test_tool_execution_proxy() {
         serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(data["items"], json!([1, 2]));
     assert_eq!(state.hits.load(Ordering::SeqCst), 1);
+    job.abort();
+}
+#[tokio::test]
+async fn test_tool_execution_sse_streaming() {
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
+    let server = ReifyServer::with_builder(FixtureBuilder::new());
+    let token = mount(&server, &url).await;
+    state.chunked.store(true, Ordering::SeqCst);
+    let response = server
+        .router()
+        .oneshot(request_with_accept(
+            &invocation(&token, "items_v1"),
+            "text/event-stream, application/json;q=0.8",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/event-stream; charset=utf-8"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-cache");
+    assert_eq!(response.headers()["connection"], "keep-alive");
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    let bytes = to_bytes(response.into_body(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replace("\r\n", "\n");
+    let messages: Vec<Value> = body
+        .split("\n\n")
+        .filter_map(|event| {
+            let event_name = event
+                .lines()
+                .find_map(|line| line.strip_prefix("event: "))?;
+            if event_name != "message" {
+                return None;
+            }
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "))?;
+            serde_json::from_str(data).ok()
+        })
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .filter(|message| {
+                message["method"] == "notifications/message"
+                    && message["params"]["data"]["chunk"].is_string()
+            })
+            .count()
+            >= 2
+    );
+    let final_response = messages
+        .iter()
+        .find(|message| message["id"] == 1 && message["result"].is_object())
+        .expect("SSE final JSON-RPC response");
+    assert_eq!(final_response["jsonrpc"], "2.0");
+    assert_eq!(final_response["result"]["isError"], false);
+    let data: Value = serde_json::from_str(
+        final_response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["items"], json!([1, 2]));
+    assert_eq!(state.hits.load(Ordering::SeqCst), 1);
+    job.abort();
+}
+#[tokio::test]
+async fn test_content_negotiation_json_backward_compatibility() {
+    let Some((url, state, job)) = upstream_server().await else {
+        return;
+    };
+    let server = ReifyServer::with_builder(FixtureBuilder::new());
+    let token = mount(&server, &url).await;
+    let response = server
+        .router()
+        .oneshot(request_with_accept(
+            &invocation(&token, "items_v1"),
+            "application/json, text/event-stream;q=0.5",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["result"]["isError"], false);
+    let data: Value =
+        serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(data["items"], json!([1, 2]));
+    let (status, _, default_body) = call(&server, invocation(&token, "items_v1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, default_body);
+    assert_eq!(state.hits.load(Ordering::SeqCst), 2);
     job.abort();
 }
 #[tokio::test]

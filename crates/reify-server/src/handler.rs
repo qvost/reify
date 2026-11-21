@@ -4,8 +4,9 @@ use axum::{
     Json,
     body::Bytes,
     extract::State as ExtractState,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, sse::Event},
 };
+use futures_util::{StreamExt, stream};
 use http::{HeaderMap, StatusCode};
 use reify_core::{
     ReifyError,
@@ -33,6 +34,10 @@ fn response(
     result: Result<Value, (i64, &str, Option<Value>)>,
     ttl: Duration,
 ) -> Response {
+    let (body, scope) = rpc_body(id, result);
+    crate::wire::finish((status, Json(body)).into_response(), ttl, scope)
+}
+fn rpc_body(id: Value, result: Result<Value, (i64, &str, Option<Value>)>) -> (Value, CacheScope) {
     let scope = match result
         .as_ref()
         .ok()
@@ -63,32 +68,124 @@ fn response(
             Value::Object(body)
         }
     };
-    crate::wire::finish((status, Json(body)).into_response(), ttl, scope)
+    (body, scope)
+}
+
+struct ToolSseStream {
+    chunks: crate::proxy::UpstreamChunks,
+    collected: Vec<u8>,
+    status: u16,
+    chunk_index: usize,
+    id: Value,
+    key: CacheKey,
+    cached: Arc<CachedApp>,
+    state: Arc<State>,
+    done: bool,
+}
+impl ToolSseStream {
+    async fn next(mut self) -> Option<(Result<Event, std::convert::Infallible>, Self)> {
+        if self.done {
+            return None;
+        }
+        if let Some(chunk) = self.chunks.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    self.collected.extend_from_slice(&chunk);
+                    self.chunk_index += 1;
+                    let notification = json!({
+                        "jsonrpc":"2.0",
+                        "method":"notifications/message",
+                        "params":{
+                            "level":"info",
+                            "logger":"reify.upstream",
+                            "data":{
+                                "chunk":String::from_utf8_lossy(&chunk),
+                                "index":self.chunk_index
+                            }
+                        }
+                    });
+                    return Some((Ok(crate::wire::sse_message(&notification)), self));
+                }
+                Err(message) => return Some((Ok(self.final_event(Some(message)).await), self)),
+            }
+        }
+        Some((Ok(self.final_event(None).await), self))
+    }
+    async fn final_event(&mut self, read_error: Option<&str>) -> Event {
+        self.done = true;
+        let mut upstream = match read_error {
+            Some(message) => crate::proxy::body_failure(self.status, message),
+            None => crate::proxy::body_result(self.status, std::mem::take(&mut self.collected)),
+        };
+        if let Some(event) = healing::detect(self.key, upstream.status, &upstream.result.content)
+            && self
+                .state
+                .store
+                .current(&self.key)
+                .await
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.cached))
+        {
+            self.state.healing.submit(event);
+        }
+        upstream.result.cache_hint = Some(hint(Duration::ZERO, app_scope(&self.cached)));
+        let result = upstream
+            .result
+            .into_mcp_value()
+            .expect("captured JSON serializes");
+        let (body, _) = rpc_body(self.id.clone(), Ok(result));
+        crate::wire::sse_message(&body)
+    }
 }
 
 pub(crate) fn error(status: StatusCode, id: Value, code: i64, message: &str) -> Response {
     response(status, id, Err((code, message, None)), Duration::ZERO)
 }
 fn accepts(headers: &HeaderMap, mime: &str) -> bool {
-    headers
+    quality(headers, mime) > 0.0
+}
+fn quality(headers: &HeaderMap, mime: &str) -> f32 {
+    let mut exact = None::<f32>;
+    let mut wildcard = None::<f32>;
+    for part in headers
         .get_all("accept")
         .iter()
         .filter_map(|h| h.to_str().ok())
         .flat_map(|h| h.split(','))
-        .any(|part| {
-            let mut pieces = part.trim().split(';');
-            pieces
-                .next()
-                .is_some_and(|s| s.trim().eq_ignore_ascii_case(mime))
-                && pieces.all(|p| {
-                    let p = p.trim();
-                    if let Some(q) = p.strip_prefix("q=") {
-                        q.parse::<f32>().is_ok_and(|n| n > 0.0 && n <= 1.0)
-                    } else {
-                        true
+    {
+        let mut pieces = part.trim().split(';');
+        let Some(media) = pieces.next().map(str::trim) else {
+            continue;
+        };
+        let mut q = 1.0;
+        let mut valid = true;
+        for parameter in pieces {
+            if let Some((name, value)) = parameter.trim().split_once('=')
+                && name.trim().eq_ignore_ascii_case("q")
+            {
+                match value.trim().parse::<f32>() {
+                    Ok(parsed) if (0.0..=1.0).contains(&parsed) => q = parsed,
+                    _ => {
+                        valid = false;
+                        break;
                     }
-                })
-        })
+                }
+            }
+        }
+        if !valid {
+            continue;
+        }
+        if media.eq_ignore_ascii_case(mime) {
+            exact = Some(exact.map_or(q, |current| current.max(q)));
+        } else if media == "*/*" {
+            wildcard = Some(wildcard.map_or(q, |current| current.max(q)));
+        }
+    }
+    exact.or(wildcard).unwrap_or(0.0)
+}
+fn prefers_sse(headers: &HeaderMap) -> bool {
+    let json = quality(headers, "application/json");
+    let sse = quality(headers, "text/event-stream");
+    sse > 0.0 && sse > json
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,14 +252,19 @@ pub(crate) async fn handle(
             "Content-Type must be application/json",
         );
     }
-    if !accepts(&headers, "application/json") || !accepts(&headers, "text/event-stream") {
+    let has_accept = headers.get_all("accept").iter().next().is_some();
+    if has_accept
+        && !accepts(&headers, "application/json")
+        && !accepts(&headers, "text/event-stream")
+    {
         return error(
             StatusCode::NOT_ACCEPTABLE,
             Value::Null,
             -32600,
-            "Accept must list application/json and text/event-stream",
+            "Accept must allow application/json or text/event-stream",
         );
     }
+    let stream_response = has_accept && prefers_sse(&headers);
     let mut request: McpRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => {
@@ -391,17 +493,67 @@ pub(crate) async fn handle(
                 };
                 let auth_headers = match &prepared.headers {
                     Ok(h) => h,
-                    Err(_) => return tool_failure(id, "Upstream invocation failed"),
+                    Err(_) => {
+                        return if stream_response {
+                            tool_failure_sse(id, "Upstream invocation failed")
+                        } else {
+                            tool_failure(id, "Upstream invocation failed")
+                        };
+                    }
                 };
                 if state.proxy.get().is_none() {
                     match UpstreamProxy::new() {
                         Ok(proxy) => {
                             let _ = state.proxy.set(proxy);
                         }
-                        Err(_) => return tool_failure(id, "Cannot configure upstream client"),
+                        Err(_) => {
+                            return if stream_response {
+                                tool_failure_sse(id, "Cannot configure upstream client")
+                            } else {
+                                tool_failure(id, "Cannot configure upstream client")
+                            };
+                        }
                     };
                 }
                 let proxy = state.proxy.get().expect("proxy initialized");
+                if stream_response {
+                    let upstream = match proxy
+                        .execute_prepared_streaming(
+                            tool,
+                            renderer,
+                            &arguments,
+                            &cached.auth,
+                            auth_headers,
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(ReifyError::SchemaValidationError(_)) => {
+                            return error(
+                                StatusCode::BAD_REQUEST,
+                                id,
+                                -32602,
+                                "Invalid compiled tool arguments",
+                            );
+                        }
+                        Err(_) => return tool_failure_sse(id, "Upstream invocation failed"),
+                    };
+                    let stream = stream::unfold(
+                        ToolSseStream {
+                            chunks: upstream.chunks,
+                            collected: Vec::new(),
+                            status: upstream.status,
+                            chunk_index: 0,
+                            id,
+                            key,
+                            cached: Arc::clone(cached),
+                            state: Arc::clone(&state),
+                            done: false,
+                        },
+                        |state| state.next(),
+                    );
+                    return crate::wire::sse_response(stream, Duration::ZERO, app_scope(cached));
+                }
                 let mut upstream = match proxy
                     .execute_prepared(tool, renderer, &arguments, &cached.auth, auth_headers)
                     .await
@@ -454,7 +606,23 @@ fn hint(ttl: Duration, scope: CacheScope) -> CacheHint {
     }
 }
 fn tool_failure(id: Value, message: &str) -> Response {
-    let result = ToolCallResult {
+    response(
+        StatusCode::OK,
+        id,
+        Ok(tool_failure_result(message)),
+        Duration::ZERO,
+    )
+}
+fn tool_failure_sse(id: Value, message: &str) -> Response {
+    let (body, scope) = rpc_body(id, Ok(tool_failure_result(message)));
+    crate::wire::sse_response(
+        stream::iter([Ok(crate::wire::sse_message(&body))]),
+        Duration::ZERO,
+        scope,
+    )
+}
+fn tool_failure_result(message: &str) -> Value {
+    ToolCallResult {
         content: vec![ContentBlock::Text {
             text: message.into(),
         }],
@@ -462,6 +630,5 @@ fn tool_failure(id: Value, message: &str) -> Response {
         cache_hint: None,
     }
     .into_mcp_value()
-    .expect("text result serializes");
-    response(StatusCode::OK, id, Ok(result), Duration::ZERO)
+    .expect("text result serializes")
 }

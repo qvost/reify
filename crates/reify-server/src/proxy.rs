@@ -1,6 +1,8 @@
 //! Bounded upstream invocation. Redirects are disabled to prevent credential forwarding.
 use crate::failure;
+use bytes::Bytes;
 use chrono::Utc;
+use futures_util::{Stream, stream};
 use http::Method;
 use reify_core::{
     ReifyError,
@@ -8,9 +10,18 @@ use reify_core::{
     mcp::{ContentBlock, ToolCallResult},
 };
 use serde_json::Value;
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+pub(crate) type UpstreamChunks = Pin<Box<dyn Stream<Item = Result<Bytes, &'static str>> + Send>>;
+
+/// Upstream status and a bounded stream of response body chunks.
+pub(crate) struct StreamingProxyResponse {
+    /// Upstream HTTP status, including non-success statuses.
+    pub status: u16,
+    /// Body chunks, or one terminal bounded-read error.
+    pub chunks: UpstreamChunks,
+}
 /// One invocation plus status for drift classification.
 pub struct ProxyResponse {
     /// Upstream HTTP status, including non-success statuses.
@@ -60,6 +71,92 @@ impl UpstreamProxy {
         auth: &AuthContext,
         headers: &http::HeaderMap,
     ) -> Result<ProxyResponse, ReifyError> {
+        let (status, mut response) = self
+            .send_prepared(tool, prepared, arguments, auth, headers)
+            .await?;
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_RESPONSE as u64)
+        {
+            return Ok(body_failure(status, "upstream response exceeds 4 MiB"));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_RESPONSE as u64) as usize,
+        );
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => return Ok(body_failure(status, "cannot read upstream response")),
+            };
+            if bytes.len() + chunk.len() > MAX_RESPONSE {
+                return Ok(body_failure(status, "upstream response exceeds 4 MiB"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(body_result(status, bytes))
+    }
+
+    /// Invoke a prepared tool and expose its body as bounded upstream chunks.
+    pub(crate) async fn execute_prepared_streaming(
+        &self,
+        tool: &CompiledTool,
+        prepared: &reify_synth::compiler::PreparedTool,
+        arguments: &Value,
+        auth: &AuthContext,
+        headers: &http::HeaderMap,
+    ) -> Result<StreamingProxyResponse, ReifyError> {
+        let (status, response) = self
+            .send_prepared(tool, prepared, arguments, auth, headers)
+            .await?;
+        let oversized = response
+            .content_length()
+            .is_some_and(|n| n > MAX_RESPONSE as u64);
+        let chunks = if oversized {
+            Box::pin(stream::once(async {
+                Err("upstream response exceeds 4 MiB")
+            })) as UpstreamChunks
+        } else {
+            Box::pin(stream::unfold(
+                (response, 0usize, false),
+                |(mut response, mut size, done)| async move {
+                    if done {
+                        return None;
+                    }
+                    match response.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if size.saturating_add(chunk.len()) > MAX_RESPONSE {
+                                Some((
+                                    Err("upstream response exceeds 4 MiB"),
+                                    (response, size, true),
+                                ))
+                            } else {
+                                size += chunk.len();
+                                Some((Ok(chunk), (response, size, false)))
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(_) => {
+                            Some((Err("cannot read upstream response"), (response, size, true)))
+                        }
+                    }
+                },
+            )) as UpstreamChunks
+        };
+        Ok(StreamingProxyResponse { status, chunks })
+    }
+
+    async fn send_prepared(
+        &self,
+        tool: &CompiledTool,
+        prepared: &reify_synth::compiler::PreparedTool,
+        arguments: &Value,
+        auth: &AuthContext,
+        headers: &http::HeaderMap,
+    ) -> Result<(u16, reqwest::Response), ReifyError> {
         let rendered = prepared.render(arguments)?;
         let current = match &self.bridge {
             Some(bridge) => Some(bridge.auth_for(&rendered.url).await?.unwrap_or_default()),
@@ -96,53 +193,32 @@ impl UpstreamProxy {
         if let Some(body) = rendered.body {
             request = request.json(body.as_ref());
         }
-        let mut response = request
+        let response = request
             .send()
             .await
             .map_err(|_| failure("upstream request failed or timed out"))?;
         let status = response.status().as_u16();
-        if response
-            .content_length()
-            .is_some_and(|n| n > MAX_RESPONSE as u64)
-        {
-            return Ok(body_failure(status, "upstream response exceeds 4 MiB"));
-        }
-        let mut bytes = Vec::with_capacity(
-            response
-                .content_length()
-                .unwrap_or(0)
-                .min(MAX_RESPONSE as u64) as usize,
-        );
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(_) => return Ok(body_failure(status, "cannot read upstream response")),
-            };
-            if bytes.len() + chunk.len() > MAX_RESPONSE {
-                return Ok(body_failure(status, "upstream response exceeds 4 MiB"));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let block = match serde_json::from_slice(&bytes) {
-            Ok(json) => ContentBlock::Json { json },
-            Err(_) => ContentBlock::Text {
-                text: String::from_utf8(bytes).unwrap_or_else(|error| {
-                    String::from_utf8_lossy(&error.into_bytes()).into_owned()
-                }),
-            },
-        };
-        Ok(ProxyResponse {
-            status,
-            result: ToolCallResult {
-                content: vec![block],
-                is_error: !(200..300).contains(&status),
-                cache_hint: None,
-            },
-        })
+        Ok((status, response))
     }
 }
-fn body_failure(status: u16, message: &str) -> ProxyResponse {
+pub(crate) fn body_result(status: u16, bytes: Vec<u8>) -> ProxyResponse {
+    let block = match serde_json::from_slice(&bytes) {
+        Ok(json) => ContentBlock::Json { json },
+        Err(_) => ContentBlock::Text {
+            text: String::from_utf8(bytes)
+                .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned()),
+        },
+    };
+    ProxyResponse {
+        status,
+        result: ToolCallResult {
+            content: vec![block],
+            is_error: !(200..300).contains(&status),
+            cache_hint: None,
+        },
+    }
+}
+pub(crate) fn body_failure(status: u16, message: &str) -> ProxyResponse {
     // Preserve status evidence for drift even when the body is unavailable.
     ProxyResponse {
         status,

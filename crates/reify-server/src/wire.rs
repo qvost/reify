@@ -1,13 +1,14 @@
 //! Borrowed response views stream cached definition JSON without rebuilding trees.
 use axum::{
     Json,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse::Event},
 };
+use futures_util::Stream;
 use http::{HeaderValue, StatusCode};
 use reify_core::mcp::{CacheHint, CacheScope, PROTOCOL_VERSION};
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::{Value, value::RawValue};
-use std::{sync::LazyLock, time::Duration};
+use std::{convert::Infallible, sync::LazyLock, time::Duration};
 #[derive(Serialize)]
 pub(crate) struct ServerInfo {
     name: &'static str,
@@ -178,6 +179,46 @@ pub(crate) fn finish(mut response: Response, ttl: Duration, scope: CacheScope) -
     );
     headers.insert("mcp-stream", HeaderValue::from_static("false"));
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+/// Format one JSON-RPC message as an SSE `message` event.
+pub(crate) fn sse_message(value: &Value) -> Event {
+    Event::default()
+        .event("message")
+        .data(serde_json::to_string(value).expect("JSON values serialize"))
+}
+/// Build a request-scoped SSE response with the MCP stream headers.
+pub(crate) fn sse_response<S>(stream: S, ttl: Duration, scope: CacheScope) -> Response
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    let mut response = Sse::new(stream).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    headers.insert("cache-control", HeaderValue::from_static("no-cache"));
+    headers.insert("connection", HeaderValue::from_static("keep-alive"));
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    headers.insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static(PROTOCOL_VERSION),
+    );
+    headers.insert(
+        "mcp-cache-scope",
+        HeaderValue::from_static(match scope {
+            CacheScope::Task => "task",
+            CacheScope::Domain => "domain",
+            CacheScope::Global => "global",
+        }),
+    );
+    headers.insert(
+        "mcp-ttl-ms",
+        HeaderValue::from_str(&ttl.as_millis().min(u64::MAX as u128).to_string())
+            .expect("decimal TTL"),
+    );
+    headers.insert("mcp-stream", HeaderValue::from_static("true"));
     response
 }
 pub(crate) fn invalid_cache(id: Value) -> Response {
