@@ -129,6 +129,24 @@ pub enum Command {
         #[arg(value_name = "GOAL", num_args = 0..)]
         goal: Vec<String>,
     },
+    /// Monitor a target URL for upstream API drift and autonomously self-heal.
+    Watch {
+        /// Target website URL to monitor.
+        #[arg(value_parser=parse_url)]
+        url: Url,
+        /// Task goal used for scoped tool compilation.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Poll interval in seconds between canary checks (min: 5s, max: 86400s).
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(5..=86400))]
+        interval: u64,
+        /// Execute a single canary check and exit immediately (useful for CI/testing).
+        #[arg(long)]
+        once: bool,
+        /// Optional webhook URL to POST JSON alerts to when drift is detected.
+        #[arg(long, value_parser=parse_url)]
+        webhook: Option<Url>,
+    },
     /// Resolve and execute a synthesized tool, printing its MCP result as JSON.
     Call {
         /// Target HTTP(S) URL.
@@ -227,7 +245,14 @@ impl Cli {
             if argument.starts_with('-')
                 || matches!(
                     argument.as_ref(),
-                    "serve" | "probe" | "call" | "bridge" | "install" | "profiles" | "help"
+                    "serve"
+                        | "probe"
+                        | "watch"
+                        | "call"
+                        | "bridge"
+                        | "install"
+                        | "profiles"
+                        | "help"
                 )
             {
                 break;

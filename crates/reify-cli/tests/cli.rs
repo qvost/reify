@@ -121,6 +121,35 @@ fn test_cli_argument_parsing() {
             .command,
         Some(Command::Profiles)
     ));
+    assert!(matches!(
+        Cli::parse_checked_from([
+            "reify",
+            "watch",
+            "https://example.com",
+            "--goal",
+            "search items",
+            "--interval",
+            "5",
+            "--once",
+            "--webhook",
+            "https://hooks.example.com/alert",
+        ])
+        .unwrap()
+        .command,
+        Some(Command::Watch {
+            interval: 5,
+            once: true,
+            goal: Some(goal),
+            webhook: Some(_),
+            ..
+        }) if goal == "search items"
+    ));
+    assert_eq!(
+        Cli::parse_checked_from(["reify", "watch", "https://example.com", "--interval", "4",])
+            .unwrap_err()
+            .exit_code(),
+        2
+    );
     assert!(
         Cli::parse_checked_from(["reify", "--no-profile", "https://github.com"])
             .unwrap()

@@ -2,6 +2,7 @@
 pub mod gateway;
 pub mod install;
 pub mod probe;
+pub mod watch;
 use crate::{Cli, CliError, Command, failure, ui};
 use reify_core::domain::Target;
 use reify_probe::ProbeEngine;
@@ -14,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{net::TcpListener, sync::watch};
+use tokio::{net::TcpListener, sync::watch as shutdown_watch};
 
 /// Real measured phase metrics, never inferred or hardcoded.
 #[derive(Clone, Debug)]
@@ -124,7 +125,7 @@ pub fn configured_probe(cli: &Cli) -> ProbeEngine {
         .map_or_else(ProbeEngine::new, ProbeEngine::with_chromium)
 }
 /// Wait until a shared shutdown signal is set or its sender exits.
-pub async fn wait_for_shutdown(mut stop: watch::Receiver<bool>) {
+pub async fn wait_for_shutdown(mut stop: shutdown_watch::Receiver<bool>) {
     while !*stop.borrow_and_update() {
         if stop.changed().await.is_err() {
             break;
@@ -144,7 +145,7 @@ pub async fn run_with_shutdown<F>(cli: Cli, shutdown: F) -> Result<(), CliError>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let (signal, stop) = watch::channel(false);
+    let (signal, stop) = shutdown_watch::channel(false);
     let _watcher = Watcher(tokio::spawn(async move {
         shutdown.await;
         let _ = signal.send(true);
@@ -198,6 +199,27 @@ where
                     Vec::new()
                 });
             ui::write_serializable(&probe::report_with_tools(&output, &tools))?;
+            Ok(())
+        }
+        Some(Command::Watch {
+            url,
+            goal,
+            interval,
+            once,
+            webhook,
+        }) => {
+            watch::run_watch_with_probe(
+                url,
+                goal,
+                interval,
+                once,
+                webhook,
+                cli.fresh,
+                cli.color,
+                (*probe).clone(),
+                wait_for_shutdown(stop),
+            )
+            .await?;
             Ok(())
         }
         Some(Command::Call {
@@ -291,7 +313,7 @@ where
         }
     }
 }
-async fn drain<F>(serving: F, stop: watch::Receiver<bool>) -> Result<(), CliError>
+async fn drain<F>(serving: F, stop: shutdown_watch::Receiver<bool>) -> Result<(), CliError>
 where
     F: Future<Output = Result<(), reify_core::ReifyError>>,
 {

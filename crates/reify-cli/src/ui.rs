@@ -1,12 +1,14 @@
 //! Terminal output stays separate from machine-readable command JSON.
 use crate::{CliError, Color, commands::CompileMetrics};
 use colored::Colorize;
+use reify_core::ReifyError;
 use reify_server::MountedApp;
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
 };
+use url::Url;
 /// Decide color use without modifying the process environment.
 pub fn use_color(color: Color) -> bool {
     match color {
@@ -175,6 +177,32 @@ pub fn write_stdout(text: &str) -> Result<(), CliError> {
     out.write_all(text.as_bytes())?;
     out.flush()?;
     Ok(())
+}
+/// Format the initial status for the autonomous watch command.
+pub fn watch_baseline(target: &Url, tools: usize, hash: &str, color: bool) -> String {
+    format!(
+        "{} Monitoring: {}\n[BASELINE] {tools} tools active. Schema Hash: {hash}\n",
+        accent("[REIFY WATCH]", color),
+        safe_terminal(target.as_str()),
+    )
+}
+/// Format one healthy watch heartbeat.
+pub fn watch_heartbeat(timestamp: &str, color: bool) -> String {
+    format!(
+        "{} {timestamp} - All tools healthy. Upstream intact.\n",
+        accent("[OK]", color)
+    )
+}
+/// Format one watch status or lifecycle line.
+pub fn watch_line(label: &str, message: &str, color: bool) -> String {
+    format!("{} {}\n", accent(label, color), safe_terminal(message))
+}
+/// Write watch output, translating terminal errors to the command's core error type.
+pub fn write_watch(text: &str) -> Result<(), ReifyError> {
+    let mut out = io::stdout().lock();
+    out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|error| ReifyError::ExecutionError(format!("cannot write watch output: {error}")))
 }
 /// Print a single pretty JSON document; status/progress never contaminates stdout.
 pub fn write_json(value: &Value) -> Result<(), CliError> {

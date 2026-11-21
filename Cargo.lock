@@ -1409,6 +1409,8 @@ dependencies = [
 name = "reify-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "chrono",
  "clap",
  "colored",
  "reify-bridge",
@@ -1424,6 +1426,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
