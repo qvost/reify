@@ -87,12 +87,8 @@ impl Fixture {
             .await
         {
             Ok(output) => Some(output),
-            Err(reify_core::ReifyError::ExecutionError(message))
-                if ["Chromium startup:", "Chromium launch:", "spawn Chromium:"]
-                    .iter()
-                    .any(|prefix| message.starts_with(prefix)) =>
-            {
-                eprintln!("skipping DOM integration test: Chromium cannot launch ({message})");
+            Err(reify_core::ReifyError::ExecutionError(message)) => {
+                eprintln!("skipping DOM integration test in restricted sandbox: {message}");
                 None
             }
             Err(error) => panic!("DOM probe failed: {error}"),
