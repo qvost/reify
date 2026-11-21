@@ -3,6 +3,7 @@ use http::{HeaderMap, HeaderName};
 use reify_core::mcp::decode_header_value;
 use serde_json::Value;
 use std::collections::HashSet;
+#[derive(Clone)]
 struct Annotation {
     name: HeaderName,
     path: Vec<String>,
@@ -88,6 +89,7 @@ fn annotations(
     }
     Ok(())
 }
+#[derive(Clone)]
 pub(crate) struct ParameterMirrors {
     mirrors: Vec<Annotation>,
 }

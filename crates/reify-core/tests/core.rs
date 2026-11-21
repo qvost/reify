@@ -573,6 +573,7 @@ fn compiled_tools_auth_and_error_conversion() {
             upstream_url_template: "https://example.com/{id}".into(),
             http_method: "GET".into(),
             query_param_mappings: HashMap::from([("q".into(), "query".into())]),
+            path_parameter_defaults: HashMap::new(),
             body_template: None,
             required_auth_keys: vec!["authorization".into()],
         },

@@ -151,7 +151,7 @@ async fn worker(
                 active_domains.insert(domain.clone());
                 active.insert(key); let builder = builder.clone(); let store = store.clone();
                 let job = jobs.spawn(async move {
-                    let result = tokio::time::timeout(Duration::from_secs(45),builder.build(previous.target.clone())).await;
+                    let result = tokio::time::timeout(Duration::from_secs(45),builder.build_live(previous.target.clone())).await;
                     if let Ok(Ok(updated)) = result && updated.valid_for(key) {
                         store.replace_if_current(key,&previous,updated).await;
                     }

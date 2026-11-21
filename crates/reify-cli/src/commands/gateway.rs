@@ -87,6 +87,17 @@ pub async fn call_remote(
     name: &str,
     arguments: Value,
 ) -> Result<Value, CliError> {
+    call_remote_with_fresh(endpoint, url, goal, name, arguments, false).await
+}
+/// Bootstrap a remote mount, optionally forcing live discovery instead of a profile.
+pub async fn call_remote_with_fresh(
+    endpoint: &Url,
+    url: &Url,
+    goal: Option<String>,
+    name: &str,
+    arguments: Value,
+    fresh: bool,
+) -> Result<Value, CliError> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -97,7 +108,7 @@ pub async fn call_remote(
         &client,
         endpoint,
         1,
-        json!({"name":"reify","arguments":{"url":url,"goal":goal},"_meta":meta()}),
+        json!({"name":"reify","arguments":{"url":url,"goal":goal,"fresh":fresh},"_meta":meta()}),
     )
     .await?;
     if mounted["isError"] == true {

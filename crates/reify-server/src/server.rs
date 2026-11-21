@@ -26,12 +26,20 @@ pub trait AppBuilder: Send + Sync + 'static {
         &self,
         target: Target,
     ) -> Pin<Box<dyn Future<Output = Result<CachedApp, ReifyError>> + Send + '_>>;
+    /// Force discovery for a fresh request or recovery after upstream drift.
+    fn build_live(
+        &self,
+        target: Target,
+    ) -> Pin<Box<dyn Future<Output = Result<CachedApp, ReifyError>> + Send + '_>> {
+        self.build(target)
+    }
 }
 /// Production Chromium probe plus deterministic synth compiler.
 pub struct BrowserAppBuilder {
     probe: Arc<ProbeEngine>,
     synth: Arc<SynthEngine>,
     slots: Semaphore,
+    profiles_enabled: bool,
 }
 impl BrowserAppBuilder {
     /// Limit concurrent browser processes to two across bootstrap and recovery.
@@ -40,11 +48,30 @@ impl BrowserAppBuilder {
             probe,
             synth,
             slots: Semaphore::new(2),
+            profiles_enabled: true,
         }
+    }
+    /// Enable or bypass the embedded catalog for every cache miss.
+    pub fn with_profiles(mut self, enabled: bool) -> Self {
+        self.profiles_enabled = enabled;
+        self
     }
 }
 impl AppBuilder for BrowserAppBuilder {
     fn build(
+        &self,
+        target: Target,
+    ) -> Pin<Box<dyn Future<Output = Result<CachedApp, ReifyError>> + Send + '_>> {
+        Box::pin(async move {
+            if self.profiles_enabled
+                && let Some((_, app)) = prewarmed_app(target.clone())?
+            {
+                return Ok(app);
+            }
+            self.build_live(target).await
+        })
+    }
+    fn build_live(
         &self,
         target: Target,
     ) -> Pin<Box<dyn Future<Output = Result<CachedApp, ReifyError>> + Send + '_>> {
@@ -72,6 +99,23 @@ impl AppBuilder for BrowserAppBuilder {
         })
     }
 }
+/// Build an embedded service plan without starting Chromium or accessing a network.
+pub fn prewarmed_app(target: Target) -> Result<Option<(&'static str, CachedApp)>, ReifyError> {
+    crate::store::warm_profiles()?;
+    let Some((profile, tools)) = reify_core::profiles::for_target(&target)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        profile.name,
+        CachedApp {
+            target,
+            tools,
+            auth: Default::default(),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+        },
+    )))
+}
 #[derive(Default)]
 pub(crate) struct MountRegistry {
     by_key: HashMap<CacheKey, Arc<str>>,
@@ -88,17 +132,24 @@ pub(crate) struct State {
 }
 impl State {
     pub async fn mount(&self, target: Target) -> Result<MountedApp, ReifyError> {
-        tokio::time::timeout(Duration::from_secs(45), self.mount_inner(target))
+        self.mount_with_policy(target, false).await
+    }
+    pub async fn mount_with_policy(
+        &self,
+        target: Target,
+        fresh: bool,
+    ) -> Result<MountedApp, ReifyError> {
+        tokio::time::timeout(Duration::from_secs(45), self.mount_inner(target, fresh))
             .await
             .map_err(|_| failure("website compilation timed out"))?
     }
-    async fn mount_inner(&self, target: Target) -> Result<MountedApp, ReifyError> {
+    async fn mount_inner(&self, target: Target, fresh: bool) -> Result<MountedApp, ReifyError> {
         let target = Target::from_url(target.url, target.goal)?;
         if !target.url.username().is_empty() || target.url.password().is_some() {
             return Err(failure("URL credentials are not supported"));
         }
         let key = CacheKey::from_target(&target);
-        if let Some(app) = self.store.snapshot(&key).await {
+        if !fresh && let Some(app) = self.store.snapshot(&key).await {
             return Ok(MountedApp {
                 key,
                 token: self.token(key),
@@ -108,7 +159,7 @@ impl State {
         }
         let gate = self.gate(key);
         let _guard = gate.lock().await;
-        if let Some(app) = self.store.snapshot(&key).await {
+        if !fresh && let Some(app) = self.store.snapshot(&key).await {
             return Ok(MountedApp {
                 key,
                 token: self.token(key),
@@ -116,7 +167,11 @@ impl State {
                 cache_hit: true,
             });
         }
-        let built = self.builder.build(target).await?;
+        let built = if fresh {
+            self.builder.build_live(target).await?
+        } else {
+            self.builder.build(target).await?
+        };
         if !built.valid_for(key) {
             return Err(failure("compiler returned an invalid tool mount"));
         }
@@ -187,6 +242,7 @@ pub struct ReifyServer {
 impl ReifyServer {
     /// Construct the production server without starting any background tasks.
     pub fn new(probe: Arc<ProbeEngine>, synth: Arc<SynthEngine>) -> Self {
+        let _ = crate::store::warm_profiles();
         Self::with_builder(Arc::new(BrowserAppBuilder::new(probe, synth)))
     }
     /// Construct with an alternate real/fixture application builder.
@@ -225,6 +281,10 @@ impl ReifyServer {
     /// Resolve a BLAKE3 cache entry or compile it once, sharing the HTTP handler path.
     pub async fn mount(&self, target: Target) -> Result<MountedApp, ReifyError> {
         self.state.mount(target).await
+    }
+    /// Bypass cached/profile plans and capture a fresh application generation.
+    pub async fn mount_fresh(&self, target: Target) -> Result<MountedApp, ReifyError> {
+        self.state.mount_with_policy(target, true).await
     }
     /// Serve a pre-bound listener and drain requests after an explicit shutdown.
     pub async fn serve_listener<F>(

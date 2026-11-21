@@ -5,7 +5,7 @@ use reify_core::{
 };
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
@@ -59,25 +59,113 @@ pub struct PreparedApp {
     pub(crate) mirrors: Vec<Result<crate::parameter_headers::ParameterMirrors, ()>>,
     pub(crate) headers: Result<http::HeaderMap, String>,
 }
+#[derive(Clone)]
+struct PrewarmedParts {
+    tool: CompiledTool,
+    definition: Box<serde_json::value::RawValue>,
+    renderer: reify_synth::compiler::PreparedTool,
+    mirrors: crate::parameter_headers::ParameterMirrors,
+}
+static PREWARMED_RENDERERS: OnceLock<HashMap<String, Result<PrewarmedParts, String>>> =
+    OnceLock::new();
+
+/// Compile and retain validators for the embedded catalogs during server startup.
+pub fn warm_profiles() -> Result<(), reify_core::ReifyError> {
+    reify_core::profiles::warm()?;
+    let renderers = PREWARMED_RENDERERS.get_or_init(|| {
+        let mut renderers = HashMap::new();
+        for profile in reify_core::profiles::PROFILES {
+            if let Ok(Some(tools)) = reify_core::profiles::compile_tools(profile, None) {
+                for tool in tools {
+                    let prepared = (|| {
+                        Ok(PrewarmedParts {
+                            tool: tool.clone(),
+                            definition: tool
+                                .definition
+                                .to_mcp_json()
+                                .map_err(|error| error.to_string())?,
+                            renderer: reify_synth::compiler::PreparedTool::new(&tool)
+                                .map_err(|error| error.to_string())?,
+                            mirrors: crate::parameter_headers::ParameterMirrors::new(
+                                &tool.definition.input_schema,
+                            )
+                            .map_err(|_| "invalid pre-warmed parameter schema".to_owned())?,
+                        })
+                    })();
+                    renderers.insert(tool.definition.name.clone(), prepared);
+                }
+            }
+        }
+        renderers
+    });
+    if renderers.len()
+        != reify_core::profiles::PROFILES
+            .iter()
+            .map(|profile| profile.tools.len())
+            .sum::<usize>()
+    {
+        return Err(reify_core::ReifyError::SchemaValidationError(
+            "cannot prepare embedded profile validators".into(),
+        ));
+    }
+    if let Some(error) = renderers
+        .values()
+        .find_map(|renderer| renderer.as_ref().err())
+    {
+        return Err(reify_core::ReifyError::SchemaValidationError(error.clone()));
+    }
+    Ok(())
+}
 impl PreparedApp {
     fn new(app: Arc<CachedApp>) -> Result<Self, String> {
-        let definitions = app
-            .tools
-            .iter()
-            .map(|tool| tool.definition.to_mcp_json().map_err(|e| e.to_string()))
-            .collect::<Result<_, _>>()?;
-        let renderers = app
-            .tools
-            .iter()
-            .map(|tool| reify_synth::compiler::PreparedTool::new(tool).map_err(|e| e.to_string()))
-            .collect();
-        let mirrors = app
-            .tools
-            .iter()
-            .map(|tool| {
-                crate::parameter_headers::ParameterMirrors::new(&tool.definition.input_schema)
-            })
-            .collect();
+        let prewarmed = app.tools.iter().all(|tool| {
+            tool.definition
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.tags.iter().any(|tag| tag == "prewarmed"))
+        });
+        let (definitions, renderers, mirrors) = if prewarmed {
+            let renderers = PREWARMED_RENDERERS
+                .get()
+                .ok_or_else(|| "pre-warmed profile validators were not initialized".to_owned())?;
+            let parts = app
+                .tools
+                .iter()
+                .map(|tool| {
+                    renderers
+                        .get(&tool.definition.name)
+                        .filter(|part| part.as_ref().is_ok_and(|part| part.tool == *tool))
+                        .cloned()
+                        .ok_or_else(|| "missing pre-warmed renderer".to_owned())?
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            (
+                parts.iter().map(|part| part.definition.clone()).collect(),
+                parts.iter().map(|part| Ok(part.renderer.clone())).collect(),
+                parts.iter().map(|part| Ok(part.mirrors.clone())).collect(),
+            )
+        } else {
+            let definitions = app
+                .tools
+                .iter()
+                .map(|tool| tool.definition.to_mcp_json().map_err(|e| e.to_string()))
+                .collect::<Result<_, _>>()?;
+            let renderers = app
+                .tools
+                .iter()
+                .map(|tool| {
+                    reify_synth::compiler::PreparedTool::new(tool).map_err(|e| e.to_string())
+                })
+                .collect();
+            let mirrors = app
+                .tools
+                .iter()
+                .map(|tool| {
+                    crate::parameter_headers::ParameterMirrors::new(&tool.definition.input_schema)
+                })
+                .collect();
+            (definitions, renderers, mirrors)
+        };
         let headers = app.auth.to_headers().map_err(|e| e.to_string());
         Ok(Self {
             app,
@@ -108,6 +196,18 @@ struct StoredApp {
 impl StoredApp {
     async fn build(app: CachedApp) -> Arc<Self> {
         let app = Arc::new(app);
+        let prewarmed = app.tools.iter().all(|tool| {
+            tool.definition
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.tags.iter().any(|tag| tag == "prewarmed"))
+        });
+        if prewarmed {
+            return Arc::new(Self {
+                prepared: PreparedApp::new(app.clone()).map(Arc::new),
+                app,
+            });
+        }
         let source = app.clone();
         let prepared = tokio::task::spawn_blocking(move || PreparedApp::new(source).map(Arc::new))
             .await

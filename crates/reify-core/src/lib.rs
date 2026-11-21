@@ -8,4 +8,5 @@ pub mod cache;
 pub mod domain;
 pub mod error;
 pub mod mcp;
+pub mod profiles;
 pub use error::ReifyError;

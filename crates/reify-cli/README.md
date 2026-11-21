@@ -53,14 +53,34 @@ reify --chromium /path/to/chromium --timeout 30 https://example.com search fligh
 ```
 
 The default mode reserves `127.0.0.1:8080`, resolves the canonical BLAKE3 domain/goal
-key through the server's shared `ServerStore`, and captures/synthesizes only on a
-cache miss. It stays in the foreground serving `/mcp` until Ctrl+C or SIGTERM.
+key through the server's shared `ServerStore`. A cache miss first checks the
+embedded profile catalog, then falls back to live capture/synthesis. It stays in
+the foreground serving `/mcp` until Ctrl+C or SIGTERM.
 It does not fork an unmanaged server process or silently edit client config files.
 Chromium is discovered through `REIFY_CHROMIUM_PATH`, Playwright's cache, or PATH.
 Put global options before the URL; all following words are the goal, including
-words such as `serve` that also name subcommands.
+words such as `serve` that also name subcommands. `--fresh` (alias `--no-profile`)
+can also follow the URL/goal and forces live discovery.
 
-The summary displays measured capture/synthesis times, retained API-frame counts,
+```sh
+reify profiles
+reify https://news.ycombinator.com 'search stories'
+reify --fresh https://news.ycombinator.com 'search stories'
+reify serve --no-profile
+```
+
+Eight embedded profiles provide 16 typed tools for Hacker News, GitHub, Linear,
+DummyJSON, Wikipedia, Open-Meteo, Reddit, and Stripe. Matching goals select the
+relevant tools. Profile mounts require no browser or network discovery; private
+API calls still require credentials for the actual API origin. `reify probe`
+always captures live traffic. Remote `reify call --fresh --gateway …` sends
+`fresh: true` to the bootstrap tool, bypassing an existing cached generation.
+
+The profile-match timing is measured separately from one-time process/catalog
+initialization and socket binding. The [profile guide](../reify-core/src/profiles/README.md)
+documents endpoint sources, matching, credentials, and a reproducible benchmark.
+
+The summary displays measured profile-match or capture/synthesis times, retained API-frame counts,
 tool names/descriptions and input types, the endpoint, cache key, and mount token.
 No static-noise counts or sub-two-second guarantees are fabricated. Cold capture
 latency depends on Chromium startup and the target page. The server's 45-second

@@ -25,6 +25,24 @@ pub struct CompileMetrics {
     pub capture_ms: u64,
     /// Elapsed schema compilation time.
     pub synthesis_ms: u64,
+    /// Name of the matching in-process catalog entry, if used.
+    pub profile: Option<&'static str>,
+    /// Time spent resolving and preparing the profile.
+    pub profile_match_ms: f64,
+}
+fn profile_listing() -> String {
+    let mut output = String::new();
+    for profile in reify_core::profiles::PROFILES {
+        output.push_str(&format!("{} — {}", profile.name, profile.domain));
+        for alias in profile.aliases {
+            output.push_str(&format!(", {alias}"));
+        }
+        output.push('\n');
+        for tool in profile.tools {
+            output.push_str(&format!("  {}\n", reify_core::profiles::signature(tool)));
+        }
+    }
+    output
 }
 struct CliBuilder {
     probe: Arc<ProbeEngine>,
@@ -32,9 +50,31 @@ struct CliBuilder {
     timeout: Duration,
     metrics: Arc<Mutex<Option<CompileMetrics>>>,
     slots: tokio::sync::Semaphore,
+    profiles_enabled: bool,
 }
 impl AppBuilder for CliBuilder {
     fn build(
+        &self,
+        target: Target,
+    ) -> Pin<Box<dyn Future<Output = Result<CachedApp, reify_core::ReifyError>> + Send + '_>> {
+        Box::pin(async move {
+            if self.profiles_enabled {
+                let started = Instant::now();
+                if let Some((profile, app)) = reify_server::prewarmed_app(target.clone())? {
+                    *self.metrics.lock().expect("metrics mutex") = Some(CompileMetrics {
+                        frames: 0,
+                        capture_ms: 0,
+                        synthesis_ms: 0,
+                        profile: Some(profile),
+                        profile_match_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    });
+                    return Ok(app);
+                }
+            }
+            self.build_live(target).await
+        })
+    }
+    fn build_live(
         &self,
         target: Target,
     ) -> Pin<Box<dyn Future<Output = Result<CachedApp, reify_core::ReifyError>> + Send + '_>> {
@@ -70,6 +110,8 @@ impl AppBuilder for CliBuilder {
                 frames,
                 capture_ms,
                 synthesis_ms,
+                profile: None,
+                profile_match_ms: 0.0,
             });
             Ok(app)
         })
@@ -108,6 +150,14 @@ where
         let _ = signal.send(true);
     }));
     let probe = Arc::new(configured_probe(&cli));
+    if !cli.fresh
+        && matches!(
+            &cli.command,
+            None | Some(Command::Serve { .. } | Command::Call { .. })
+        )
+    {
+        reify_server::warm_profiles()?;
+    }
     let timeout = Duration::from_secs(cli.timeout);
     let color = ui::use_color(cli.color);
     let metrics = Arc::new(Mutex::new(None));
@@ -117,9 +167,11 @@ where
         timeout,
         metrics: metrics.clone(),
         slots: tokio::sync::Semaphore::new(2),
+        profiles_enabled: !cli.fresh,
     }));
     match cli.command {
         Some(Command::Install(options)) => install::run(&options, color),
+        Some(Command::Profiles) => ui::write_stdout(&profile_listing()),
         Some(Command::Serve { host, port }) => {
             let listener = TcpListener::bind((host.as_str(), port))
                 .await
@@ -157,7 +209,7 @@ where
         }) => {
             let result = tokio::select! {
                 result=async {
-                    if let Some(endpoint)=gateway {gateway::call_remote(&endpoint,&url,goal,&tool_name,json_arguments).await}
+                    if let Some(endpoint)=gateway {gateway::call_remote_with_fresh(&endpoint,&url,goal,&tool_name,json_arguments,cli.fresh).await}
                     else {let mounted=server.mount(Target::new(url.as_str(),goal)?).await?;
                         let tool=mounted.app.tools.iter().find(|tool|tool.definition.name==tool_name).ok_or_else(||failure(format!("tool '{tool_name}' was not synthesized; available: {}",mounted.app.tools.iter().map(|t|t.definition.name.as_str()).collect::<Vec<_>>().join(", "))))?;
                         let result=reify_server::proxy::UpstreamProxy::new()?.execute(tool,&json_arguments,&mounted.app.auth).await?;

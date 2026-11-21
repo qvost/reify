@@ -98,6 +98,34 @@ fn test_cli_argument_parsing() {
     ])
     .unwrap();
     assert_eq!(parsed.timeout, 10);
+    let parsed = Cli::parse_checked_from([
+        "reify",
+        "--fresh",
+        "https://news.ycombinator.com",
+        "search stories",
+    ])
+    .unwrap();
+    assert!(parsed.fresh);
+    let parsed = Cli::parse_checked_from([
+        "reify",
+        "https://news.ycombinator.com",
+        "search stories",
+        "--fresh",
+    ])
+    .unwrap();
+    assert!(parsed.fresh);
+    assert_eq!(parsed.goal, ["search stories"]);
+    assert!(matches!(
+        Cli::parse_checked_from(["reify", "profiles"])
+            .unwrap()
+            .command,
+        Some(Command::Profiles)
+    ));
+    assert!(
+        Cli::parse_checked_from(["reify", "--no-profile", "https://github.com"])
+            .unwrap()
+            .fresh
+    );
 }
 #[test]
 fn test_cli_error_reporting() {

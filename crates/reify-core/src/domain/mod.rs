@@ -195,6 +195,9 @@ pub struct ExecutionSpec {
     pub http_method: String,
     /// Tool argument name to upstream query parameter name.
     pub query_param_mappings: HashMap<String, String>,
+    /// Defaults for optional arguments embedded in URL path segments.
+    #[serde(default)]
+    pub path_parameter_defaults: HashMap<String, String>,
     /// Optional request JSON template.
     pub body_template: Option<Value>,
     /// Credential keys the executor must resolve before making a request.

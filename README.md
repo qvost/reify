@@ -88,7 +88,7 @@ reify probe https://example.com
 ### 4. Execute a Synthesized Tool from CLI
 
 ```bash
-reify call https://news.ycombinator.com search_stories '{"query": "rust"}'
+reify call https://news.ycombinator.com search_stories '{"q": "rust"}'
 ```
 
 ### 5. Share an Authenticated Browser Session
@@ -98,6 +98,19 @@ Load the [Shaligram Reify Chrome companion](extension/README.md) unpacked, run
 Tab** shares the tab's cookies for up to one hour. Run the gateway with the same
 `REIFY_BRIDGE_TOKEN` to use those sessions for probing and tool execution; revoke
 individual origins from the popup. The companion guide includes the full setup.
+
+### 6. Mount an Embedded Wire Profile
+
+```sh
+reify profiles
+reify https://news.ycombinator.com 'search stories'
+reify --fresh https://news.ycombinator.com 'search stories'
+```
+
+Eight embedded profiles provide 16 typed API tools and skip browser/network
+discovery for matching domains and goals. `--fresh` (alias `--no-profile`) forces
+live discovery. The [profile guide](crates/reify-core/src/profiles/README.md)
+documents the catalog, API authentication, and timing measurements.
 
 ---
 
@@ -112,7 +125,7 @@ Reify is organized as a modular Rust workspace across 6 crates:
 | [`reify-synth`](crates/reify-synth) | Algorithmic path clustering (`/items/{id}`), deterministic JSON Schema Draft 2020-12 type induction, optionality inference, and goal-directed tool pruning (strictly 3–5 tools to prevent context bloat). |
 | [`reify-server`](crates/reify-server) | High-performance `POST /mcp` handler with `Mcp-Method` / `Mcp-Name` routing, streaming support, and in-memory Blake3 store. Proxies tool calls upstream and passively monitors status codes (`401/403` auth drift, `404/400` schema drift) to trigger background re-synthesis before agents fail. |
 | [`reify-bridge`](crates/reify-bridge) | Loopback session bridge (`127.0.0.1:9099`) for explicit credentials and user-shared Chrome sessions. |
-| [`reify-cli`](crates/reify-cli) | Production CLI providing `reify`, `reify install`, `reify serve`, `reify probe`, `reify call`, and `reify bridge`. |
+| [`reify-cli`](crates/reify-cli) | Production CLI providing `reify`, `reify install`, `reify profiles`, `reify serve`, `reify probe`, `reify call`, and `reify bridge`. |
 
 ---
 

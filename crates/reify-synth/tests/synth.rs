@@ -459,12 +459,74 @@ fn prepared_rendering_preserves_types_order_and_borrows_body() {
         let actual = prepared.render(&arguments).unwrap();
         assert_eq!(actual.url, expected.url);
         assert_eq!(actual.method, expected.method);
-        assert_eq!(actual.body, expected.body.as_ref());
-        assert!(std::ptr::eq(actual.body.unwrap(), &arguments["body"]));
+        assert_eq!(actual.body.as_deref(), expected.body.as_ref());
+        assert!(std::ptr::eq(
+            actual.body.unwrap().as_ref(),
+            &arguments["body"]
+        ));
     }
     assert!(
         prepared
             .render(&json!({"user_id":"..","tag":[],"body":{"nested":{"x":1}}}))
             .is_err()
+    );
+}
+
+#[test]
+fn prewarmed_plans_render_numeric_boolean_path_query_and_graphql_inputs() {
+    let hn = reify_core::profiles::lookup_str("https://news.ycombinator.com", None).unwrap();
+    let item = reify_core::profiles::compile_tools(hn, Some("get item"))
+        .unwrap()
+        .unwrap()
+        .remove(0);
+    let rendered = render(&item, &json!({"id": 8863})).unwrap();
+    assert_eq!(
+        rendered.url.as_str(),
+        "https://hacker-news.firebaseio.com/v0/item/8863.json"
+    );
+
+    let weather = reify_core::profiles::lookup_str("https://open-meteo.com", None).unwrap();
+    let weather = reify_core::profiles::compile_tools(weather, Some("forecast weather"))
+        .unwrap()
+        .unwrap()
+        .remove(0);
+    let rendered = render(
+        &weather,
+        &json!({"latitude":27.7,"longitude":85.3,"current_weather":true}),
+    )
+    .unwrap();
+    let query: std::collections::HashMap<_, _> = rendered.url.query_pairs().into_owned().collect();
+    assert_eq!(query["latitude"], "27.7");
+    assert_eq!(query["longitude"], "85.3");
+    assert_eq!(query["current_weather"], "true");
+
+    let linear = reify_core::profiles::lookup_str("https://linear.app", None).unwrap();
+    let linear = reify_core::profiles::compile_tools(linear, Some("search issues"))
+        .unwrap()
+        .unwrap()
+        .remove(0);
+    let rendered = render(&linear, &json!({"query":"login failure"})).unwrap();
+    assert_eq!(
+        rendered.body.unwrap()["variables"]["query"],
+        "login failure"
+    );
+    let reddit = reify_core::profiles::lookup_str("https://reddit.com", None).unwrap();
+    let reddit = reify_core::profiles::compile_tools(reddit, Some("subreddit listing"))
+        .unwrap()
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        render(&reddit, &json!({"subreddit":"rust"}))
+            .unwrap()
+            .url
+            .path(),
+        "/r/rust/hot.json"
+    );
+    assert_eq!(
+        render(&reddit, &json!({"subreddit":"rust", "sort":"new"}))
+            .unwrap()
+            .url
+            .path(),
+        "/r/rust/new.json"
     );
 }

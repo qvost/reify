@@ -9,7 +9,8 @@ pub mod server;
 pub mod store;
 mod wire;
 use reify_core::ReifyError;
-pub use server::{AppBuilder, BrowserAppBuilder, MountedApp, ReifyServer};
+pub use server::{AppBuilder, BrowserAppBuilder, MountedApp, ReifyServer, prewarmed_app};
+pub use store::warm_profiles;
 fn failure(message: impl Into<String>) -> ReifyError {
     ReifyError::ExecutionError(message.into())
 }

@@ -102,6 +102,9 @@ pub struct Cli {
     /// Terminal styling mode.
     #[arg(long,global=true,value_enum,default_value_t=Color::Auto)]
     pub color: Color,
+    /// Bypass embedded profiles and perform live discovery.
+    #[arg(long, alias = "no-profile", global = true)]
+    pub fresh: bool,
 }
 /// Supported developer commands.
 #[derive(Debug, Subcommand)]
@@ -155,6 +158,8 @@ pub enum Command {
         #[arg(long, value_name = "PATH")]
         session_file: Option<PathBuf>,
     },
+    /// List embedded profiles and their typed tool signatures.
+    Profiles,
 }
 /// Validate HTTP(S), canonicalize a target, and disallow embedded credentials.
 pub fn parse_url(value: &str) -> Result<Url, String> {
@@ -182,6 +187,23 @@ impl Cli {
         T: Into<std::ffi::OsString> + Clone,
     {
         let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+        // Normalize boolean profile options before protecting the variadic goal.
+        let mut fresh = false;
+        let mut fresh_index = 1;
+        while fresh_index < args.len() {
+            if args[fresh_index] == "--" {
+                break;
+            }
+            if args[fresh_index] == "--fresh" || args[fresh_index] == "--no-profile" {
+                args.remove(fresh_index);
+                fresh = true;
+            } else {
+                fresh_index += 1;
+            }
+        }
+        if fresh {
+            args.insert(1, "--fresh".into());
+        }
         let mut index = 1;
         // Once a root URL starts, command-looking words belong to the goal.
         // Global options precede the URL; subcommand options retain normal Clap parsing.
@@ -189,6 +211,10 @@ impl Cli {
             let argument = args[index].to_string_lossy();
             if matches!(argument.as_ref(), "--timeout" | "--chromium" | "--color") {
                 index += 2;
+                continue;
+            }
+            if argument == "--fresh" || argument == "--no-profile" {
+                index += 1;
                 continue;
             }
             if argument.starts_with("--timeout=")
@@ -201,7 +227,7 @@ impl Cli {
             if argument.starts_with('-')
                 || matches!(
                     argument.as_ref(),
-                    "serve" | "probe" | "call" | "bridge" | "install" | "help"
+                    "serve" | "probe" | "call" | "bridge" | "install" | "profiles" | "help"
                 )
             {
                 break;

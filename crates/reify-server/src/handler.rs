@@ -22,7 +22,7 @@ use std::{sync::Arc, time::Duration};
 
 /// Return the always-available bootstrap tool, with a strict input schema.
 pub fn meta_tool() -> ToolDefinition {
-    ToolDefinition {name:"reify".into(),description:"Compile a live HTTP(S) website into task-scoped API tools. Return its mount token on subsequent calls.".into(),input_schema:json!({"type":"object","properties":{"url":{"type":"string","format":"uri"},"goal":{"type":["string","null"]}},"required":["url"],"additionalProperties":false}),metadata:None}
+    ToolDefinition {name:"reify".into(),description:"Compile an HTTP(S) website into task-scoped API tools. Embedded profiles skip discovery; fresh forces live capture. Return its mount token on subsequent calls.".into(),input_schema:json!({"type":"object","properties":{"url":{"type":"string","format":"uri"},"goal":{"type":["string","null"]},"fresh":{"type":"boolean","default":false}},"required":["url"],"additionalProperties":false}),metadata:None}
 }
 fn server_info() -> Value {
     json!({"name":"reify","version":env!("CARGO_PKG_VERSION")})
@@ -95,6 +95,8 @@ fn accepts(headers: &HeaderMap, mime: &str) -> bool {
 struct ReifyArguments {
     url: String,
     goal: Option<String>,
+    #[serde(default)]
+    fresh: bool,
 }
 fn mount_key(
     state: &State,
@@ -283,7 +285,7 @@ pub(crate) async fn handle(
                                 StatusCode::BAD_REQUEST,
                                 id,
                                 -32602,
-                                "reify requires url and optional goal",
+                                "reify requires url, optional goal, and optional fresh boolean",
                             );
                         }
                     };
@@ -306,7 +308,7 @@ pub(crate) async fn handle(
                         "URL credentials are not supported",
                     );
                 }
-                let mounted = match state.mount(target).await {
+                let mounted = match state.mount_with_policy(target, arguments.fresh).await {
                     Ok(mounted) => mounted,
                     Err(_) => return tool_failure(id, "Website compilation failed or timed out"),
                 };

@@ -113,10 +113,18 @@ pub fn mount_summary(
     if mounted.cache_hit {
         output.push_str("Cache hit · browser capture skipped\n");
     } else if let Some(metrics) = metrics {
-        output.push_str(&format!(
-            "Captured {} API frames in {}ms · synthesis {}ms\n",
-            metrics.frames, metrics.capture_ms, metrics.synthesis_ms
-        ));
+        if let Some(profile) = metrics.profile {
+            output.push_str(&format!(
+                "✓ Pre-warmed wire profile matched [{}] in {:.3}ms (browser capture bypassed)\n",
+                safe_terminal(profile),
+                metrics.profile_match_ms
+            ));
+        } else {
+            output.push_str(&format!(
+                "Captured {} API frames in {}ms · synthesis {}ms\n",
+                metrics.frames, metrics.capture_ms, metrics.synthesis_ms
+            ));
+        }
     }
     output.push_str(&format!("\nTools ({})\n", mounted.app.tools.len()));
     for tool in &mounted.app.tools {

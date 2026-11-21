@@ -29,6 +29,7 @@ impl UpstreamProxy {
     pub fn new() -> Result<Self, ReifyError> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .user_agent(concat!("reify/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
@@ -93,7 +94,7 @@ impl UpstreamProxy {
             .request(method, rendered.url)
             .headers(headers.clone());
         if let Some(body) = rendered.body {
-            request = request.json(body);
+            request = request.json(body.as_ref());
         }
         let mut response = request
             .send()

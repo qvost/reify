@@ -106,6 +106,7 @@ pub fn compile(
             upstream_url_template: format!("{}{}", cluster.origin, cluster.path_template),
             http_method: cluster.method.clone(),
             query_param_mappings,
+            path_parameter_defaults: HashMap::new(),
             body_template,
             required_auth_keys: auth_keys(auth),
         },
@@ -126,6 +127,7 @@ pub struct RenderedRequest {
 /// Arguments are validated against the generated schema before interpolation.
 /// Prepared immutable validation and query ordering for repeated invocations.
 /// Rebuild this object when the tool definition changes; it never caches arguments.
+#[derive(Clone)]
 pub struct PreparedTool {
     validator: jsonschema::Validator,
     properties: BTreeSet<String>,
@@ -133,12 +135,14 @@ pub struct PreparedTool {
     template: String,
     method: String,
     queries: Vec<(String, String)>,
+    path_defaults: HashMap<String, String>,
     body: BodyTemplate,
 }
+#[derive(Clone)]
 enum BodyTemplate {
     None,
     Argument,
-    Unsupported,
+    Template(Value),
 }
 /// Borrowed JSON body/method with an owned URL, ready for request serialization.
 pub struct RenderedRequestRef<'a> {
@@ -147,7 +151,7 @@ pub struct RenderedRequestRef<'a> {
     /// Original HTTP method.
     pub method: &'a str,
     /// Complete typed body, borrowing the invocation's arguments.
-    pub body: Option<&'a Value>,
+    pub body: Option<std::borrow::Cow<'a, Value>>,
 }
 impl PreparedTool {
     /// Compile schema validation once, retaining only execution configuration.
@@ -183,7 +187,7 @@ impl PreparedTool {
         let body = match &tool.execution.body_template {
             None => BodyTemplate::None,
             Some(Value::String(s)) if s == "{body}" => BodyTemplate::Argument,
-            _ => BodyTemplate::Unsupported,
+            Some(template) => BodyTemplate::Template(template.clone()),
         };
         Ok(Self {
             validator,
@@ -192,6 +196,7 @@ impl PreparedTool {
             template: tool.execution.upstream_url_template.clone(),
             method: tool.execution.http_method.clone(),
             queries,
+            path_defaults: tool.execution.path_parameter_defaults.clone(),
             body,
         })
     }
@@ -224,11 +229,21 @@ impl PreparedTool {
                 .map(|n| n + start)
                 .ok_or_else(|| invalid("unclosed path argument"))?;
             let key = &template[start + 1..end];
-            let value = args
-                .get(key)
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid(format!("path argument {key} must be a string")))?;
-            if value.is_empty() || matches!(value, "." | "..") {
+            let value = match args.get(key) {
+                Some(Value::String(value)) => value.clone(),
+                Some(Value::Number(value)) => value.to_string(),
+                Some(_) => {
+                    return Err(invalid(format!(
+                        "path argument {key} must be a string or number"
+                    )));
+                }
+                None => self
+                    .path_defaults
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| invalid(format!("missing path argument {key}")))?,
+            };
+            if value.is_empty() || matches!(value.as_str(), "." | "..") {
                 return Err(invalid("path argument cannot be empty or a dot segment"));
             }
             let encoder = encoder
@@ -237,7 +252,7 @@ impl PreparedTool {
             encoder
                 .path_segments_mut()
                 .expect("hierarchical URL")
-                .push(value);
+                .push(&value);
             template.replace_range(start..=end, encoder.path().trim_start_matches('/'));
         }
         let mut url =
@@ -261,28 +276,52 @@ impl PreparedTool {
         if pairs.peek().is_some() {
             let mut query = url.query_pairs_mut();
             for (input, upstream, value) in pairs {
-                query.append_pair(
-                    upstream,
-                    value.as_str().ok_or_else(|| {
-                        invalid(format!("query argument {input} must contain strings"))
-                    })?,
-                );
+                let value = match value {
+                    Value::String(value) => value.clone(),
+                    Value::Number(value) => value.to_string(),
+                    Value::Bool(value) => value.to_string(),
+                    _ => {
+                        return Err(invalid(format!(
+                            "query argument {input} must contain primitive values"
+                        )));
+                    }
+                };
+                query.append_pair(upstream, &value);
             }
         }
-        let body = match self.body {
+        let body = match &self.body {
             BodyTemplate::None => None,
-            BodyTemplate::Argument => args.get("body"),
-            BodyTemplate::Unsupported => {
-                return Err(invalid(
-                    "unsupported body template; expected whole-document {body}",
-                ));
-            }
+            BodyTemplate::Argument => args.get("body").map(std::borrow::Cow::Borrowed),
+            BodyTemplate::Template(template) => Some(std::borrow::Cow::Owned(
+                render_body_template(template, args),
+            )),
         };
         Ok(RenderedRequestRef {
             url,
             method: &self.method,
             body,
         })
+    }
+}
+fn render_body_template(template: &Value, arguments: &Map<String, Value>) -> Value {
+    match template {
+        Value::String(value) if value.starts_with('{') && value.ends_with('}') => arguments
+            .get(&value[1..value.len() - 1])
+            .cloned()
+            .unwrap_or_else(|| template.clone()),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| render_body_template(value, arguments))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), render_body_template(value, arguments)))
+                .collect(),
+        ),
+        _ => template.clone(),
     }
 }
 /// One-shot compatibility renderer. Repeated executors should retain PreparedTool.
@@ -292,6 +331,6 @@ pub fn render(tool: &CompiledTool, arguments: &Value) -> Result<RenderedRequest,
     Ok(RenderedRequest {
         url: result.url,
         method: result.method.to_owned(),
-        body: result.body.cloned(),
+        body: result.body.map(std::borrow::Cow::into_owned),
     })
 }
