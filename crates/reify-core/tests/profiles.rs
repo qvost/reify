@@ -19,6 +19,36 @@ fn every_requested_domain_alias_and_wikipedia_subdomain_is_indexed() {
         "https://www.reddit.com",
         "https://stripe.com",
         "https://api.stripe.com",
+        "https://arxiv.org",
+        "https://export.arxiv.org",
+        "https://coingecko.com",
+        "https://api.coingecko.com",
+        "https://crates.io",
+        "https://api.crates.io",
+        "https://duckduckgo.com",
+        "https://api.duckduckgo.com",
+        "https://frankfurter.app",
+        "https://api.frankfurter.app",
+        "https://gitlab.com",
+        "https://gutendex.com",
+        "https://jsonplaceholder.typicode.com",
+        "https://npmjs.com",
+        "https://registry.npmjs.org",
+        "https://registry.npmjs.com",
+        "https://openlibrary.org",
+        "https://open-elevation.com",
+        "https://api.open-elevation.com",
+        "https://pypi.org",
+        "https://pypi.python.org",
+        "https://pokeapi.co",
+        "https://api.pokeapi.co",
+        "https://restcountries.com",
+        "https://semanticscholar.org",
+        "https://api.semanticscholar.org",
+        "https://stackoverflow.com",
+        "https://api.stackexchange.com",
+        "https://wikidata.org",
+        "https://www.wikidata.org",
     ] {
         assert!(
             profiles::lookup(&Url::parse(url).unwrap(), None).is_some(),
@@ -34,7 +64,14 @@ fn every_requested_domain_alias_and_wikipedia_subdomain_is_indexed() {
     ] {
         assert!(profiles::lookup(&Url::parse(url).unwrap(), None).is_none());
     }
-    assert_eq!(PROFILES.len(), 8);
+    assert_eq!(PROFILES.len(), 25);
+    assert_eq!(
+        PROFILES
+            .iter()
+            .map(|profile| profile.tools.len())
+            .sum::<usize>(),
+        39
+    );
 }
 
 #[test]

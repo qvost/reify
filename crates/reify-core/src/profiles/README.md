@@ -1,6 +1,6 @@
 # Pre-warmed wire profiles
 
-The embedded catalog contains 8 services and 16 read operations. Profiles are
+The embedded catalog contains 25 services and 39 read operations. Profiles are
 curated request plans, with `prewarmed` provenance; they are not browser captures
 or stored authenticated sessions. No network requests occur during selection or
 mounting, and no credentials ship in the catalog.
@@ -54,6 +54,38 @@ or for an operation outside the catalog.
 
 The catalog follows these upstream API references:
 
+| Service | Matched domains (aliases) | Pre-warmed endpoints |
+| --- | --- | --- |
+| arXiv | `arxiv.org` (`export.arxiv.org`) | `GET /api/query` (`search_query`, `max_results`) |
+| CoinGecko | `coingecko.com` (`api.coingecko.com`) | `GET /api/v3/simple/price` (`ids`, `vs_currencies`); `GET /api/v3/search` (`query`) |
+| Crates.io | `crates.io` (`api.crates.io`) | `GET /api/v1/crates` (`q`, `per_page`); `GET /api/v1/crates/{name}` |
+| DuckDuckGo Instant Answer | `duckduckgo.com` (`api.duckduckgo.com`) | `GET /?format=json` (`q`) |
+| DummyJSON | `dummyjson.com` | `GET /products` (`limit`, `skip`); `GET /products/search` (`q`) |
+| Frankfurter FX Rates | `frankfurter.app` (`api.frankfurter.app`) | `GET /latest` (`from`, `to`) |
+| GitHub | `github.com` (`api.github.com`) | `GET /search/repositories`; `GET /repos/{owner}/{repo}`; `GET /repos/{owner}/{repo}/issues` |
+| GitLab | `gitlab.com` | `GET /api/v4/projects` (`search`) |
+| Gutendex | `gutendex.com` | `GET /books/` (`search`) |
+| Hacker News | `news.ycombinator.com` (`hn.algolia.com`) | `GET /api/v1/search` (`q`, `tags`, `page`); `GET /v0/item/{id}.json` |
+| JSONPlaceholder | `jsonplaceholder.typicode.com` | `GET /posts` (`userId`); `GET /posts/{id}` |
+| Linear | `linear.app` (`api.linear.app`) | `POST /graphql` (issue search, team listing) |
+| npm Registry | `npmjs.com` (`registry.npmjs.org`, `registry.npmjs.com`) | `GET /-/v1/search` (`text`, `size`); `GET /{package}` |
+| Open-Elevation | `open-elevation.com` (`api.open-elevation.com`) | `GET /api/v1/lookup` (`locations`) |
+| Open Library | `openlibrary.org` | `GET /search.json` (`q`) |
+| Open-Meteo | `open-meteo.com` (`api.open-meteo.com`) | `GET /v1/forecast` (`latitude`, `longitude`, `current_weather`) |
+| PokeAPI | `pokeapi.co` (`api.pokeapi.co`) | `GET /api/v2/pokemon/{name_or_id}`; `GET /api/v2/pokemon` (`limit`, `offset`) |
+| PyPI | `pypi.org` (`pypi.python.org`) | `GET /pypi/{project}/json` |
+| Reddit | `reddit.com` (`www.reddit.com`, `oauth.reddit.com`) | `GET /r/{subreddit}/{sort}.json`; `GET /search.json` (`q`) |
+| REST Countries | `restcountries.com` | `GET /v3.1/name/{name}`; `GET /v3.1/all` |
+| Semantic Scholar | `semanticscholar.org` (`api.semanticscholar.org`) | `GET /graph/v1/paper/search` (`query`, `limit`) |
+| Stack Exchange | `stackoverflow.com` (`api.stackexchange.com`) | `GET /2.3/search/advanced?site=stackoverflow` (`q`) |
+| Stripe | `stripe.com` (`api.stripe.com`) | `GET /v1/customers`; `GET /v1/charges` |
+| Wikidata | `wikidata.org` (`www.wikidata.org`) | `GET /w/api.php?action=wbsearchentities&search={search}&language=en&format=json` |
+| Wikipedia | `wikipedia.org` (`*.wikipedia.org`) | `GET /w/rest.php/v1/search/page` (`q`, `limit`); `GET /api/rest_v1/page/summary/{title}` |
+
+The paths in the table are relative to the matching API origin; inputs in
+parentheses are typed query parameters. The three supplemental profiles are
+GitLab, Open Library, and Stack Exchange.
+
 - Hacker News: [Algolia search](https://hn.algolia.com/api) and
   [official item API](https://github.com/HackerNews/API).
 - GitHub: [search](https://docs.github.com/en/rest/search),
@@ -69,6 +101,23 @@ The catalog follows these upstream API references:
 - Reddit: [listings and search](https://www.reddit.com/dev/api/).
 - Stripe: [customers](https://docs.stripe.com/api/customers/list) and
   [charges](https://docs.stripe.com/api/charges/list).
+- Crates.io: [API data access](https://crates.io/data-access).
+- npm: [registry API](https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md).
+- PyPI: [JSON API](https://docs.pypi.org/api/json/).
+- arXiv: [API user manual](https://info.arxiv.org/help/api/user-manual.html).
+- CoinGecko: [API reference](https://docs.coingecko.com/reference/introduction).
+- Frankfurter: [API documentation](https://www.frankfurter.app/docs/).
+- REST Countries: [API](https://restcountries.com/).
+- PokeAPI: [version 2 documentation](https://pokeapi.co/docs/v2).
+- JSONPlaceholder: [guide](https://jsonplaceholder.typicode.com/guide/).
+- Gutendex: [API](https://gutendex.com/).
+- Semantic Scholar: [API documentation](https://api.semanticscholar.org/api-docs/).
+- DuckDuckGo: [Instant Answer API](https://duckduckgo.com/api).
+- Open-Elevation: [project and API](https://github.com/Jorl17/open-elevation).
+- Wikidata: [entity search API](https://www.wikidata.org/w/api.php?action=help&modules=wbsearchentities).
+- GitLab: [projects API](https://docs.gitlab.com/api/projects/).
+- Open Library: [developer API](https://openlibrary.org/developers/api).
+- Stack Exchange: [search/advanced API](https://api.stackexchange.com/docs/search-advanced).
 
 Upstream access, authentication, availability, and rate limits still apply when
 an agent executes a tool. A pre-warmed mount does not verify the live service.
